@@ -56,18 +56,60 @@ is configured — `⚙️ עריכת המערכת`.
 `docs/index.html` is a Telegram Mini App: a Hebrew, RTL, touch-friendly weekly
 calendar (page through weeks with ‹ ›, up to a year ahead) for managing
 lessons — day/time/duration/participant-count pickers, and a toggle for
-recurring (repeats every week) vs one-time (that date only). It is a static
-page — Telegram passes the result back to the bot, so no extra server is
-needed. To enable it:
+recurring (repeats every week) vs one-time (that date only). Telegram passes
+the saved result straight back to the bot, so no database/API access from the
+page itself is needed either way. Two ways to host it:
 
-1. Serve `docs/` over HTTPS. Easiest: GitHub → repo **Settings → Pages →
-   Source: Deploy from a branch → `main` / `docs`** → Save. After a minute the
-   page is live at `https://<username>.github.io/training-booking-bot/`.
+### Option A — GitHub Pages (quick, free, but public)
+
+1. GitHub → repo **Settings → Pages → Source: Deploy from a branch →
+   `main` / `docs`** → Save. After a minute the page is live at
+   `https://<username>.github.io/training-booking-bot/`.
 2. Put that URL in `.env`: `WEBAPP_URL=https://<username>.github.io/training-booking-bot/`
-3. Restart the bot. The trainer's keyboard now shows `⚙️ עריכת המערכת`, which
-   opens the mini app pre-filled with the current schedule. Saving replaces the
-   schedule: new lessons are added, missing ones removed (their future bookings
-   are cancelled), duration/capacity changes keep existing bookings.
+3. Restart the bot.
+
+Note: GitHub Pages sites built from a public repo are always publicly
+reachable — anyone with the link can view it (no login). Not a write/security
+hole (see Option B's note on `on_web_app_data`), just not private.
+
+### Option B — self-hosted on your own server, admin-only
+
+Serves the exact same page from the bot's own process instead, gated by a
+secret token so only requests carrying it get through — no GitHub Pages
+involved, and nothing publicly reachable without the token.
+
+1. Generate a secret and put it, plus the URL you'll route to it, in `.env`:
+   ```
+   WEBAPP_URL=https://yourdomain.com/training-booking/
+   WEBAPP_SECRET=<output of: openssl rand -hex 32>
+   # WEBAPP_PORT=8082   # only if 8082 is already taken on your server
+   ```
+2. Rebuild/restart the bot (`docker compose up -d --build`, or restart your
+   process manager if running without Docker). It now also listens on
+   `127.0.0.1:8082` (Docker: published from the container to the host's
+   loopback only in `docker-compose.yml` — not reachable from the internet
+   directly).
+3. Point your existing nginx at it. Add this `location` inside the `server {
+   }` block for the domain in step 1 (adjust the path to match), then
+   `sudo nginx -t && sudo systemctl reload nginx`:
+   ```nginx
+   location /training-booking/ {
+       proxy_pass http://127.0.0.1:8082/;
+       proxy_set_header Host $host;
+   }
+   ```
+   Since this reuses a path under a domain you already serve over HTTPS, no
+   new DNS record or certificate is needed.
+
+Either way, once `WEBAPP_URL` is set the trainer's keyboard shows
+`⚙️ עריכת המערכת`, which opens the mini app pre-filled with the current
+schedule. Saving replaces the schedule: new lessons are added, missing ones
+removed (their future bookings are cancelled), duration/capacity changes keep
+existing bookings. Note that *viewing* the page is what the GitHub-Pages-vs-
+self-hosted choice above controls — *saving* changes is always restricted to
+the real trainer regardless of hosting, since `on_web_app_data` in
+`bot/handlers.py` only applies data sent by the Telegram user ID matching
+`TRAINER_ID`.
 
 ## Setup
 
@@ -91,6 +133,9 @@ Configuration (environment variables or `.env`):
 | `DB_PATH` | `bookings.db` | SQLite database file |
 | `TIMEZONE` | `UTC` | IANA timezone for the schedule, e.g. `America/Chicago` |
 | `BOOKING_DAYS_AHEAD` | `7` | How many days ahead trainees can book |
+| `WEBAPP_URL` | — | Mini app URL (see [Schedule-editing mini app](#schedule-editing-mini-app-trainer)) |
+| `WEBAPP_SECRET` | — | Self-hosted mini app only: shared secret required as `?token=` |
+| `WEBAPP_PORT` | `8082` | Self-hosted mini app only: port the bot listens on |
 
 ## Running with Docker (recommended for always-on hosting)
 

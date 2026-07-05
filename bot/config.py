@@ -27,6 +27,8 @@ class Config:
     timezone: ZoneInfo
     booking_days_ahead: int
     webapp_url: str = ""
+    webapp_secret: str = ""
+    webapp_port: int = 8082
 
 
 def load_config() -> Config:
@@ -45,4 +47,6 @@ def load_config() -> Config:
         timezone=ZoneInfo(os.environ.get("TIMEZONE", "UTC")),
         booking_days_ahead=int(os.environ.get("BOOKING_DAYS_AHEAD", "7")),
         webapp_url=os.environ.get("WEBAPP_URL", "").strip(),
+        webapp_secret=os.environ.get("WEBAPP_SECRET", "").strip(),
+        webapp_port=int(os.environ.get("WEBAPP_PORT", "8082")),
     )

@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot/ bot/
+COPY docs/ docs/
 
 # Keep the SQLite database on a mounted volume so bookings survive
 # container rebuilds (see docker-compose.yml).

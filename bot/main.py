@@ -8,6 +8,7 @@ from .config import load_config
 from .db import Database
 from .handlers import CFG, DB, register_handlers, setup_commands_menu
 from .reminders import send_due_reminders
+from .webapp_server import start_webapp_server
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
@@ -25,6 +26,8 @@ def main() -> None:
     app.bot_data[DB] = Database(cfg.db_path)
     app.bot_data[CFG] = cfg
     register_handlers(app)
+    if cfg.webapp_url and cfg.webapp_secret:
+        start_webapp_server(cfg.webapp_secret, cfg.webapp_port)
     if app.job_queue is not None:
         app.job_queue.run_repeating(send_due_reminders, interval=60, first=10)
     else:

@@ -158,7 +158,10 @@ def _webapp_edit_url(cfg: Config, db: Database) -> str:
     ]
     payload = {"recurring": recurring, "one_time": one_time}
     separator = "&" if "?" in cfg.webapp_url else "?"
-    return f"{cfg.webapp_url}{separator}data={quote(json.dumps(payload))}"
+    url = f"{cfg.webapp_url}{separator}data={quote(json.dumps(payload))}"
+    if cfg.webapp_secret:
+        url += f"&token={quote(cfg.webapp_secret)}"
+    return url
 
 
 def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> ReplyKeyboardMarkup:

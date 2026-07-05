@@ -6,6 +6,12 @@ services:
     env_file: .env
     environment:
       DB_PATH: /data/bookings.db
+    ports:
+      # Only used when WEBAPP_SECRET is set (self-hosting the mini app
+      # instead of GitHub Pages). Bound to the host's loopback only, so it's
+      # reachable from a reverse proxy running on this same VPS but never
+      # from the public internet directly.
+      - "127.0.0.1:${WEBAPP_PORT:-8082}:${WEBAPP_PORT:-8082}"
     volumes:
       - bot-data:/data
 
