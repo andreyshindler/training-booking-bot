@@ -62,6 +62,7 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("addslot", "הוספת מועד שבועי"),
     BotCommand("delslot", "מחיקת מועד שבועי"),
     BotCommand("bookings", "כל האימונים הקרובים"),
+    BotCommand("webapplink", "קישור לעריכת המערכת בדפדפן"),
 ]
 
 
@@ -766,6 +767,21 @@ async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def webapp_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    cfg, db = _cfg(context), _db(context)
+    if not cfg.webapp_url:
+        await update.message.reply_text("לא הוגדר WEBAPP_URL. ראו .env.example.")
+        return
+    url = _webapp_edit_url(cfg, db)
+    await update.message.reply_text(
+        "קישור לעריכת המערכת — פותח בכל דפדפן (כולל במחשב), לא רק בטלגרם.\n"
+        "תקף עד השינוי הבא במערכת או שליחת /start (הקישור מתעדכן אז).\n\n"
+        f"{url}"
+    )
+
+
 def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
@@ -775,6 +791,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("delslot", del_slot))
     app.add_handler(CommandHandler("schedule", schedule))
     app.add_handler(CommandHandler("bookings", bookings))
+    app.add_handler(CommandHandler("webapplink", webapp_link))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

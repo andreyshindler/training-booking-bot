@@ -43,6 +43,7 @@ Trainer only:
 | `/delslot <id>` | Remove a slot, recurring or one-time (ids shown by `/schedule`) |
 | `/schedule` | Show the weekly schedule and upcoming one-time lessons |
 | `/bookings` | Tappable list of upcoming sessions — view each session's roster and waiting list, cancel a participant |
+| `/webapplink` | The mini app link as plain text, so it can be opened in any browser (not just Telegram's in-app view) |
 
 ## Buttons instead of commands
 
