@@ -287,11 +287,18 @@ class Database:
 
     def bookings_from(self, from_day: date) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT b.*, s.start_time, s.duration_min FROM bookings b "
+            "SELECT b.*, s.start_time, s.duration_min, s.capacity FROM bookings b "
             "JOIN slots s ON s.id = b.slot_id "
             "WHERE b.date >= ? "
             "ORDER BY b.date, s.start_time",
             (from_day.isoformat(),),
+        ).fetchall()
+
+    def bookings_for_slot(self, slot_id: int, day: date) -> list[sqlite3.Row]:
+        """Everyone enrolled in one specific session, for the trainer's roster view."""
+        return self.conn.execute(
+            "SELECT * FROM bookings WHERE slot_id = ? AND date = ? ORDER BY created_at",
+            (slot_id, day.isoformat()),
         ).fetchall()
 
     def booking_counts_from(self, from_day: date) -> dict[tuple[int, str], int]:

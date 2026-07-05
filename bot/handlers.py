@@ -342,6 +342,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_book(query, context, payload)
     elif action == "cancel":
         await _handle_cancel(query, context, payload)
+    elif action == "roster":
+        await _handle_roster(query, context, payload)
+    elif action == "rosterback":
+        await _handle_roster_back(query, context)
 
 
 async def _handle_book(query, context, payload: str) -> None:
@@ -387,6 +391,56 @@ async def _handle_cancel(query, context, payload: str) -> None:
     await query.edit_message_text(f"❌ האימון בוטל: {label}")
     if not is_trainer:
         await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
+
+
+def _session_keyboard(rows) -> InlineKeyboardMarkup:
+    """One button per (slot, date) session, grouping the flat booking rows."""
+    keyboard = []
+    seen = set()
+    for row in rows:
+        key = (row["slot_id"], row["date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        count = sum(1 for r in rows if (r["slot_id"], r["date"]) == key)
+        day = date.fromisoformat(row["date"])
+        label = hebrew_day_label(day, row["start_time"], row["duration_min"], row["capacity"], count)
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"roster|{row['slot_id']}|{row['date']}")]
+        )
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def _handle_roster(query, context, payload: str) -> None:
+    db = _db(context)
+    slot_id_str, _, day_str = payload.partition("|")
+    slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
+    slot = db.get_slot(slot_id)
+    participants = db.bookings_for_slot(slot_id, day)
+    if slot is None or not participants:
+        await query.edit_message_text("ההרשמות למועד הזה כבר לא זמינות.")
+        return
+    label = hebrew_day_label(day, slot["start_time"], slot["duration_min"], slot["capacity"], len(participants))
+    keyboard = [
+        [InlineKeyboardButton(f"❌ {row['user_name']}", callback_data=f"cancel|{row['id']}")]
+        for row in participants
+    ]
+    keyboard.append([InlineKeyboardButton("🔙 חזרה לרשימה", callback_data="rosterback")])
+    await query.edit_message_text(
+        f"משתתפים ב{label}:\n(לחצו על שם כדי לבטל את ההרשמה שלו)",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _handle_roster_back(query, context) -> None:
+    rows = _db(context).bookings_from(_now(context).date())
+    if not rows:
+        await query.edit_message_text("אין אימונים קרובים.")
+        return
+    await query.edit_message_text(
+        "האימונים הקרובים — לחצו על מועד לצפייה במשתתפים ולביטול:",
+        reply_markup=_session_keyboard(rows),
+    )
 
 
 # --- trainer commands ---
@@ -493,8 +547,10 @@ async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.message.reply_text("אין אימונים קרובים.")
         return
-    lines = [f"{_fmt_booking(row)} — {row['user_name']}" for row in rows]
-    await update.message.reply_text("האימונים הקרובים:\n" + "\n".join(lines))
+    await update.message.reply_text(
+        "האימונים הקרובים — לחצו על מועד לצפייה במשתתפים ולביטול:",
+        reply_markup=_session_keyboard(rows),
+    )
 
 
 def register_handlers(app: Application) -> None:

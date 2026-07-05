@@ -63,6 +63,18 @@ def test_group_slot_allows_multiple_users_up_to_capacity(db):
     assert db.booking_counts_from(day) == {(slot_id, "2026-07-06"): 2}
 
 
+def test_bookings_for_slot_returns_only_that_sessions_roster(db):
+    slot_id = db.add_slot(0, "10:00", 60, capacity=5)
+    other_slot_id = db.add_slot(0, "12:00", 60, capacity=5)
+    day = date(2026, 7, 6)
+    db.book(slot_id, day, 111, "Alice")
+    db.book(slot_id, day, 222, "Bob")
+    db.book(slot_id, date(2026, 7, 13), 111, "Alice")  # different date, excluded
+    db.book(other_slot_id, day, 333, "Carol")  # different slot, excluded
+    roster = db.bookings_for_slot(slot_id, day)
+    assert [r["user_name"] for r in roster] == ["Alice", "Bob"]
+
+
 def test_cancel_booking_frees_slot(db):
     slot_id = db.add_slot(0, "10:00")
     day = date(2026, 7, 6)
