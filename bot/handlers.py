@@ -3,7 +3,7 @@
 import io
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 from telegram import (
@@ -969,6 +969,15 @@ _ACTION_LABELS = {
 AUDIT_LOG_FILE_LIMIT = 1000
 
 
+def _local_timestamp(created_at_utc: str, tz) -> str:
+    """SQLite's datetime('now') stores UTC; render it in the bot's timezone."""
+    try:
+        dt = datetime.fromisoformat(created_at_utc).replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return created_at_utc
+
+
 async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
@@ -976,10 +985,12 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not rows:
         await update.message.reply_text("יומן הפעולות ריק.")
         return
+    tz = _cfg(context).timezone
     lines = []
     for row in rows:
         action = _ACTION_LABELS.get(row["action"], row["action"])
-        line = f"{row['created_at']} — {row['user_name']} ({row['user_id']}): {action}"
+        stamp = _local_timestamp(row["created_at"], tz)
+        line = f"{stamp} — {row['user_name']} ({row['user_id']}): {action}"
         if row["details"]:
             line += f" — {row['details']}"
         lines.append(line)
