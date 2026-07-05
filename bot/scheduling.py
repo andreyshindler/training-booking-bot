@@ -43,11 +43,16 @@ def parse_time(text: str) -> str:
     return f"{int(match.group(1)):02d}:{match.group(2)}"
 
 
-def hebrew_day_label(day: date, start_time: str, duration_min: int) -> str:
-    return (
+def hebrew_day_label(
+    day: date, start_time: str, duration_min: int, capacity: int = 1, booked_count: int = 0
+) -> str:
+    label = (
         f"יום {WEEKDAY_NAMES_HE[day.weekday()]} {day.strftime('%d/%m')} "
         f"{start_time} ({duration_min} דק')"
     )
+    if capacity > 1:
+        label += f" — {booked_count}/{capacity} נרשמו"
+    return label
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,8 @@ class OpenSlot:
     day: date
     start_time: str  # "HH:MM"
     duration_min: int
+    capacity: int = 1
+    booked_count: int = 0
 
     @property
     def start_dt(self) -> datetime:
@@ -63,19 +70,23 @@ class OpenSlot:
         return datetime.combine(self.day, time(hour, minute))
 
     def label(self) -> str:
-        return hebrew_day_label(self.day, self.start_time, self.duration_min)
+        return hebrew_day_label(
+            self.day, self.start_time, self.duration_min, self.capacity, self.booked_count
+        )
 
 
 def available_slots(
     slots,
-    booked_pairs: set[tuple[int, str]],
+    booking_counts: dict[tuple[int, str], int],
     now: datetime,
     days_ahead: int,
 ) -> list[OpenSlot]:
     """Expand the weekly schedule into concrete open slots for the next N days.
 
-    ``slots`` is an iterable of mappings with keys id/weekday/start_time/duration_min
-    (sqlite3.Row works). Slots already booked or already started are excluded.
+    ``slots`` is an iterable of mappings with keys id/weekday/start_time/
+    duration_min/capacity (sqlite3.Row works). ``booking_counts`` maps
+    (slot_id, iso_date) to how many users are already enrolled. Slots already
+    started or already at capacity are excluded.
     """
     by_weekday: dict[int, list] = {}
     for slot in slots:
@@ -86,13 +97,17 @@ def available_slots(
     for offset in range(days_ahead + 1):
         day = today + timedelta(days=offset)
         for slot in by_weekday.get(day.weekday(), []):
-            if (slot["id"], day.isoformat()) in booked_pairs:
+            capacity = slot["capacity"]
+            booked_count = booking_counts.get((slot["id"], day.isoformat()), 0)
+            if booked_count >= capacity:
                 continue
             open_slot = OpenSlot(
                 slot_id=slot["id"],
                 day=day,
                 start_time=slot["start_time"],
                 duration_min=slot["duration_min"],
+                capacity=capacity,
+                booked_count=booked_count,
             )
             if open_slot.start_dt <= now.replace(tzinfo=None):
                 continue

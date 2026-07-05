@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from bot.db import Database, SlotTakenError
+from bot.db import Database, SlotFullError, SlotTakenError
 
 
 @pytest.fixture
@@ -31,18 +31,36 @@ def test_duplicate_slot_rejected(db):
         db.add_slot(0, "10:00")
 
 
-def test_booking_and_double_booking(db):
-    slot_id = db.add_slot(0, "10:00")
+def test_booking_full_capacity_rejected(db):
+    slot_id = db.add_slot(0, "10:00")  # default capacity 1
     day = date(2026, 7, 6)
     db.book(slot_id, day, 111, "Alice")
-    with pytest.raises(SlotTakenError):
+    with pytest.raises(SlotFullError):
         db.book(slot_id, day, 222, "Bob")
     # same slot on a different date is fine
     db.book(slot_id, date(2026, 7, 13), 222, "Bob")
-    assert db.booked_pairs_from(day) == {
-        (slot_id, "2026-07-06"),
-        (slot_id, "2026-07-13"),
+    assert db.booking_counts_from(day) == {
+        (slot_id, "2026-07-06"): 1,
+        (slot_id, "2026-07-13"): 1,
     }
+
+
+def test_booking_same_user_twice_rejected(db):
+    slot_id = db.add_slot(0, "10:00", 60, capacity=5)
+    day = date(2026, 7, 6)
+    db.book(slot_id, day, 111, "Alice")
+    with pytest.raises(SlotTakenError):
+        db.book(slot_id, day, 111, "Alice")
+
+
+def test_group_slot_allows_multiple_users_up_to_capacity(db):
+    slot_id = db.add_slot(0, "10:00", 60, capacity=2)
+    day = date(2026, 7, 6)
+    db.book(slot_id, day, 111, "Alice")
+    db.book(slot_id, day, 222, "Bob")
+    with pytest.raises(SlotFullError):
+        db.book(slot_id, day, 333, "Carol")
+    assert db.booking_counts_from(day) == {(slot_id, "2026-07-06"): 2}
 
 
 def test_cancel_booking_frees_slot(db):
@@ -74,6 +92,13 @@ def test_sync_slots_adds_removes_updates(db):
     assert (added, removed, updated) == (1, 1, 1)
     rows = {(r["weekday"], r["start_time"]): r["duration_min"] for r in db.list_slots()}
     assert rows == {(0, "10:00"): 60, (2, "18:00"): 90, (6, "09:00"): 45}
+
+
+def test_sync_slots_sets_capacity(db):
+    db.add_slot(0, "10:00", 60)  # default capacity 1
+    added, removed, updated = db.sync_slots([(0, "10:00", 60, 8)])
+    assert (added, removed, updated) == (0, 0, 1)
+    assert db.list_slots()[0]["capacity"] == 8
 
 
 def test_sync_slots_duration_change_keeps_bookings(db):

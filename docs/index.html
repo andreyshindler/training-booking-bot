@@ -52,8 +52,8 @@
     padding: 14px; margin-top: 20px;
   }
   .add-card .title { font-weight: 600; margin-bottom: 10px; font-size: 0.95rem; }
-  .row { display: flex; gap: 8px; }
-  .field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .field { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 0.75rem; color: var(--hint); }
   select, input {
     width: 100%;
@@ -98,6 +98,10 @@
         <label for="durInp">משך האימון (דקות)</label>
         <input id="durInp" type="number" value="60" min="15" max="480" step="15">
       </div>
+      <div class="field">
+        <label for="capInp">מספר משתתפים</label>
+        <input id="capInp" type="number" value="1" min="1" max="100" step="1">
+      </div>
     </div>
     <button class="add-btn" onclick="addSlot()">+ הוספה</button>
     <div class="error" id="err"></div>
@@ -118,6 +122,7 @@
       weekday: Number(s.weekday),
       start_time: String(s.start_time),
       duration_min: Number(s.duration_min) || 60,
+      capacity: Number(s.capacity) || 1,
     }));
   } catch (e) { /* start empty on bad input */ }
 
@@ -145,7 +150,8 @@
         for (const s of daySlots) {
           const chip = document.createElement("span");
           chip.className = "chip";
-          chip.textContent = s.start_time + " · " + s.duration_min + " דק'";
+          chip.textContent = s.start_time + " · " + s.duration_min + " דק'" +
+            (s.capacity > 1 ? " · עד " + s.capacity + " משתתפים" : "");
           const del = document.createElement("button");
           del.textContent = "✕";
           del.setAttribute("aria-label", "מחיקה");
@@ -168,13 +174,15 @@
     const weekday = Number(document.getElementById("daySel").value);
     const time = document.getElementById("timeInp").value;
     const dur = Number(document.getElementById("durInp").value);
+    const cap = Number(document.getElementById("capInp").value);
     if (!time) { err.textContent = "יש לבחור שעה."; return; }
     if (!(dur > 0 && dur <= 480)) { err.textContent = "משך האימון: 1 עד 480 דקות."; return; }
+    if (!(cap > 0 && cap <= 100)) { err.textContent = "מספר משתתפים: 1 עד 100."; return; }
     if (slots.some(s => s.weekday === weekday && s.start_time === time)) {
       err.textContent = "כבר קיים מועד ביום ובשעה האלה.";
       return;
     }
-    slots.push({ weekday: weekday, start_time: time, duration_min: dur });
+    slots.push({ weekday: weekday, start_time: time, duration_min: dur, capacity: cap });
     render();
   }
 

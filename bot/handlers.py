@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 
 from .config import Config
-from .db import Database, SlotTakenError
+from .db import Database, SlotFullError, SlotTakenError
 from .scheduling import (
     WEEKDAY_NAMES_HE,
     available_slots,
@@ -125,6 +125,7 @@ def _webapp_edit_url(cfg: Config, db: Database) -> str:
             "weekday": row["weekday"],
             "start_time": row["start_time"],
             "duration_min": row["duration_min"],
+            "capacity": row["capacity"],
         }
         for row in db.list_slots()
     ]
@@ -180,7 +181,7 @@ async def book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db, cfg = _db(context), _cfg(context)
     now = _now(context)
     open_slots = available_slots(
-        db.list_slots(), db.booked_pairs_from(now.date()), now, cfg.booking_days_ahead
+        db.list_slots(), db.booking_counts_from(now.date()), now, cfg.booking_days_ahead
     )
     if not open_slots:
         await update.message.reply_text(
@@ -262,7 +263,10 @@ async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             duration = int(slot.get("duration_min", 60))
             if not 0 < duration <= 480:
                 raise ValueError(f"duration out of range: {duration}")
-            desired.append((weekday, start_time, duration))
+            capacity = int(slot.get("capacity", 1))
+            if not 0 < capacity <= 100:
+                raise ValueError(f"capacity out of range: {capacity}")
+            desired.append((weekday, start_time, duration, capacity))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Bad web app data: %s", exc)
         await update.effective_message.reply_text(
@@ -306,10 +310,13 @@ async def _handle_book(query, context, payload: str) -> None:
         return
     try:
         db.book(slot_id, day, user.id, _display_name(user))
-    except SlotTakenError:
+    except SlotFullError:
         await query.edit_message_text(
-            "מצטערים, המועד הרגע נתפס. בחרו מועד אחר עם /book."
+            "מצטערים, כל המקומות תפוסים במועד הזה. בחרו מועד אחר עם /book."
         )
+        return
+    except SlotTakenError:
+        await query.edit_message_text("כבר נרשמתם למועד הזה.")
         return
 
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
@@ -339,21 +346,30 @@ async def _handle_cancel(query, context, payload: str) -> None:
 async def add_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
-    usage = "שימוש: /addslot <יום> <HH:MM> [דקות] — למשל: /addslot שני 10:00 60"
+    usage = (
+        "שימוש: /addslot <יום> <HH:MM> [דקות] [משתתפים] — "
+        "למשל: /addslot שני 10:00 60 5"
+    )
     try:
         if len(context.args) < 2:
             raise ValueError(usage)
         weekday = parse_weekday(context.args[0])
         start_time = parse_time(context.args[1])
+        duration = 60
+        capacity = 1
         if len(context.args) > 2:
             if not context.args[2].isdigit():
                 raise ValueError(usage)
             duration = int(context.args[2])
-        else:
-            duration = 60
+        if len(context.args) > 3:
+            if not context.args[3].isdigit():
+                raise ValueError(usage)
+            capacity = int(context.args[3])
         if not 0 < duration <= 480:
             raise ValueError("משך האימון חייב להיות בין 1 ל־480 דקות.")
-        slot_id = _db(context).add_slot(weekday, start_time, duration)
+        if not 0 < capacity <= 100:
+            raise ValueError("מספר המשתתפים חייב להיות בין 1 ל־100.")
+        slot_id = _db(context).add_slot(weekday, start_time, duration, capacity)
     except ValueError as exc:
         await update.message.reply_text(str(exc))
         return
@@ -362,9 +378,10 @@ async def add_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "לא ניתן להוסיף — כבר קיים מועד ביום ובשעה האלה."
         )
         return
+    extra = f", {capacity} משתתפים" if capacity > 1 else ""
     await update.message.reply_text(
         f"נוסף מועד #{slot_id}: יום {WEEKDAY_NAMES_HE[weekday]} "
-        f"{start_time} ({duration} דק')",
+        f"{start_time} ({duration} דק'{extra})",
         reply_markup=_main_keyboard(context, is_trainer=True),
     )
 
@@ -398,7 +415,8 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = [
         f"#{row['id']} יום {WEEKDAY_NAMES_HE[row['weekday']]} {row['start_time']} "
-        f"({row['duration_min']} דק')"
+        f"({row['duration_min']} דק'"
+        + (f", {row['capacity']} משתתפים)" if row["capacity"] > 1 else ")")
         for row in rows
     ]
     await update.message.reply_text("המערכת השבועית:\n" + "\n".join(lines))
