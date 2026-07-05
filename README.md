@@ -33,6 +33,29 @@ Trainer only:
 | `/schedule` | Show the weekly schedule |
 | `/bookings` | List all upcoming booked sessions |
 
+## Buttons instead of commands
+
+`/start` pins an always-visible button keyboard in the chat, so nobody has to
+type commands: trainees get `📅 הזמנת אימון` and `🗓 האימונים שלי`; the trainer
+additionally gets `📋 המערכת השבועית`, `👥 כל האימונים`, and — when the mini app
+is configured — `⚙️ עריכת המערכת`.
+
+## Schedule-editing mini app (trainer)
+
+`docs/index.html` is a Telegram Mini App: a Hebrew, RTL, touch-friendly screen
+for editing the weekly schedule (add a slot with day/time/duration pickers,
+delete with a tap, save). It is a static page — Telegram passes the result
+back to the bot, so no extra server is needed. To enable it:
+
+1. Serve `docs/` over HTTPS. Easiest: GitHub → repo **Settings → Pages →
+   Source: Deploy from a branch → `main` / `docs`** → Save. After a minute the
+   page is live at `https://<username>.github.io/training-booking-bot/`.
+2. Put that URL in `.env`: `WEBAPP_URL=https://<username>.github.io/training-booking-bot/`
+3. Restart the bot. The trainer's keyboard now shows `⚙️ עריכת המערכת`, which
+   opens the mini app pre-filled with the current schedule. Saving replaces the
+   schedule: new slots are added, missing ones removed (their future bookings
+   are cancelled), duration changes keep existing bookings.
+
 ## Setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.

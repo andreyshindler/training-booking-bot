@@ -62,6 +62,36 @@ class Database:
             "SELECT * FROM slots WHERE id = ?", (slot_id,)
         ).fetchone()
 
+    def sync_slots(self, desired: list[tuple[int, str, int]]) -> tuple[int, int, int]:
+        """Make the stored schedule match ``desired`` [(weekday, "HH:MM", minutes)].
+
+        Slots are matched by (weekday, start_time): missing ones are removed
+        (cascading their bookings), new ones added, and duration changes applied
+        in place so existing bookings survive. Returns (added, removed, updated).
+        """
+        existing = {(r["weekday"], r["start_time"]): r for r in self.list_slots()}
+        want: dict[tuple[int, str], int] = {}
+        for weekday, start_time, duration_min in desired:
+            want[(weekday, start_time)] = duration_min
+
+        added = removed = updated = 0
+        for key, row in existing.items():
+            if key not in want:
+                self.remove_slot(row["id"])
+                removed += 1
+            elif row["duration_min"] != want[key]:
+                with self.conn:
+                    self.conn.execute(
+                        "UPDATE slots SET duration_min = ? WHERE id = ?",
+                        (want[key], row["id"]),
+                    )
+                updated += 1
+        for key, duration_min in want.items():
+            if key not in existing:
+                self.add_slot(key[0], key[1], duration_min)
+                added += 1
+        return added, removed, updated
+
     # --- bookings (made by trainees) ---
 
     def book(self, slot_id: int, day: date, user_id: int, user_name: str) -> int:

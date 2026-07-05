@@ -64,6 +64,34 @@ def test_bookings_for_user_only_upcoming(db):
     assert rows[0]["start_time"] == "10:00"
 
 
+def test_sync_slots_adds_removes_updates(db):
+    db.add_slot(0, "10:00", 60)   # will stay unchanged
+    db.add_slot(2, "18:00", 60)   # will get a new duration
+    db.add_slot(4, "07:00", 60)   # will be removed
+    added, removed, updated = db.sync_slots(
+        [(0, "10:00", 60), (2, "18:00", 90), (6, "09:00", 45)]
+    )
+    assert (added, removed, updated) == (1, 1, 1)
+    rows = {(r["weekday"], r["start_time"]): r["duration_min"] for r in db.list_slots()}
+    assert rows == {(0, "10:00"): 60, (2, "18:00"): 90, (6, "09:00"): 45}
+
+
+def test_sync_slots_duration_change_keeps_bookings(db):
+    slot_id = db.add_slot(0, "10:00", 60)
+    db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.sync_slots([(0, "10:00", 90)])
+    rows = db.bookings_from(date(2026, 1, 1))
+    assert len(rows) == 1 and rows[0]["duration_min"] == 90
+
+
+def test_sync_slots_removal_cancels_bookings(db):
+    slot_id = db.add_slot(0, "10:00", 60)
+    db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.sync_slots([])
+    assert db.list_slots() == []
+    assert db.bookings_from(date(2026, 1, 1)) == []
+
+
 def test_removing_slot_cascades_bookings(db):
     slot_id = db.add_slot(0, "10:00")
     db.book(slot_id, date(2026, 7, 6), 111, "Alice")

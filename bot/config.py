@@ -26,6 +26,7 @@ class Config:
     db_path: str
     timezone: ZoneInfo
     booking_days_ahead: int
+    webapp_url: str = ""
 
 
 def load_config() -> Config:
@@ -43,4 +44,5 @@ def load_config() -> Config:
         db_path=os.environ.get("DB_PATH", "bookings.db"),
         timezone=ZoneInfo(os.environ.get("TIMEZONE", "UTC")),
         booking_days_ahead=int(os.environ.get("BOOKING_DAYS_AHEAD", "7")),
+        webapp_url=os.environ.get("WEBAPP_URL", "").strip(),
     )
