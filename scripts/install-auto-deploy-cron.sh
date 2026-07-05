@@ -17,5 +17,4 @@ CRON_LINE="* * * * * $SCRIPT"
 
 echo "Installed cron entry: $CRON_LINE"
 echo "Every merge to main now deploys within ~1 minute."
-echo "Watch deploys with: tail -f /var/log/auto-deploy.log"
-echo "(falls back to $REPO_DIR/auto-deploy.log when /var/log isn't writable)"
+echo "Watch deploys with: tail -f $REPO_DIR/auto-deploy.log"

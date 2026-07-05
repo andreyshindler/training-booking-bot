@@ -118,8 +118,8 @@ From then on it's fully automatic:
   so no inbound SSH or webhooks are needed.
 - You get a ✅/❌ Telegram message after each deploy (sent to `TRAINER_ID`
   using the bot's own token from `.env`).
-- Watch deploys: `tail -f /var/log/auto-deploy.log` (falls back to
-  `auto-deploy.log` in the repo when `/var/log` isn't writable).
+- Watch deploys: `tail -f auto-deploy.log` in the repository directory
+  (override the location with the `AUTO_DEPLOY_LOG` environment variable).
 
 `scripts/auto-deploy.sh` is a no-op when `main` hasn't changed, uses a lock so
 runs never overlap, and hard-resets to `origin/main` (don't keep local edits

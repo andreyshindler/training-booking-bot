@@ -6,9 +6,7 @@
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_FILE="${AUTO_DEPLOY_LOG:-/var/log/auto-deploy.log}"
-# fall back to a log inside the repo when /var/log isn't writable
-{ touch "$LOG_FILE" 2>/dev/null; } || LOG_FILE="$REPO_DIR/auto-deploy.log"
+LOG_FILE="${AUTO_DEPLOY_LOG:-$REPO_DIR/auto-deploy.log}"
 LOCK_FILE="${TMPDIR:-/tmp}/training-booking-bot-deploy.lock"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG_FILE"; }
