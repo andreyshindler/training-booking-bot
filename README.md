@@ -1,5 +1,7 @@
 # Training Booking Bot
 
+![CI](https://github.com/andreyshindler/training-booking-bot/actions/workflows/ci.yml/badge.svg)
+
 A Telegram bot that lets a trainer's clients book training sessions from the
 trainer's predefined weekly schedule.
 
@@ -112,3 +114,12 @@ pytest
 The core logic (slot expansion in `bot/scheduling.py`, storage in `bot/db.py`)
 is independent of Telegram and fully unit-tested; `bot/handlers.py` wires it to
 python-telegram-bot v21.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the test suite on Python 3.11
+and 3.12, an import smoke test, and a Docker image build with a container
+smoke test. It triggers on every push to `main` and every pull request, plus a
+daily cron run at 06:00 UTC so dependency breakage is caught even without new
+commits. It can also be started manually from the Actions tab
+(`workflow_dispatch`).
