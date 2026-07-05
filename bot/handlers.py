@@ -249,6 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db, cfg = _db(context), _cfg(context)
+    _log(context, update.effective_user, "view_book")
     now = _now(context)
     one_time = db.list_one_time_slots(now.date(), now.date() + timedelta(days=cfg.booking_days_ahead))
     open_slots = available_slots(
@@ -314,6 +315,7 @@ def _my_bookings_keyboard(rows, waiting=()) -> InlineKeyboardMarkup:
 
 async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = _db(context)
+    _log(context, update.effective_user, "view_my_bookings")
     user_id = update.effective_user.id
     today = _now(context).date()
     rows = db.bookings_for_user(user_id, today)
@@ -781,6 +783,7 @@ async def del_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "view_schedule")
     db, cfg = _db(context), _cfg(context)
     rows = db.list_slots()
     sections = []
@@ -816,6 +819,7 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "view_bookings")
     db = _db(context)
     rows = db.bookings_from(_now(context).date())
     if not rows:
@@ -830,6 +834,7 @@ async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def webapp_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "view_webapplink")
     cfg, db = _cfg(context), _db(context)
     if not cfg.webapp_url:
         await update.message.reply_text("לא הוגדר WEBAPP_URL. ראו .env.example.")
@@ -839,8 +844,10 @@ async def webapp_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         note = "הקישור קבוע ותמיד מציג את המערכת העדכנית — אין צורך לרענן אותו."
     else:
         note = "הקישור הזה כולל תמונת מצב של המערכת; לאחר עדכון שלחו /start לקבלת קישור חדש."
+    keyboard = [[InlineKeyboardButton("🌐 פתיחה בדפדפן", url=url)]]
     await update.message.reply_text(
-        f"קישור לעריכת המערכת — פותח בכל דפדפן (כולל במחשב), לא רק בטלגרם.\n{note}\n\n{url}"
+        f"קישור לעריכת המערכת — פותח בכל דפדפן (כולל במחשב), לא רק בטלגרם.\n{note}\n\n{url}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -865,6 +872,7 @@ async def _do_add_admin(context: ContextTypes.DEFAULT_TYPE, requester, new_id: i
 async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "open_add_admin_prompt")
     context.user_data["awaiting_admin_id"] = True
     await update.message.reply_text(
         "שלחו את המספר המזהה (ID) של המנהל החדש.\n"
@@ -927,6 +935,7 @@ async def del_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def list_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "view_admins")
     cfg, db = _cfg(context), _db(context)
     lines = [f"#{cfg.trainer_id} (מנהל ראשי, מוגדר ב-.env)"]
     lines += [f"#{row['user_id']} — {row['user_name']}" for row in db.list_admins()]
@@ -946,6 +955,13 @@ _ACTION_LABELS = {
     "delslot": "מחיקת מועד",
     "add_admin": "הוספת מנהל",
     "remove_admin": "הסרת מנהל",
+    "view_book": "צפייה במועדים פנויים",
+    "view_my_bookings": "צפייה באימונים שלי",
+    "view_schedule": "צפייה במערכת השבועית",
+    "view_bookings": "צפייה ברשימת האימונים הקרובים",
+    "view_webapplink": "בקשת קישור לעריכת המערכת",
+    "view_admins": "צפייה ברשימת מנהלים",
+    "open_add_admin_prompt": "פתיחת טופס הוספת מנהל",
 }
 
 

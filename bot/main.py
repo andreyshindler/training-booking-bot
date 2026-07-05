@@ -28,9 +28,18 @@ def main() -> None:
     app.bot_data[CFG] = cfg
     register_handlers(app)
     if cfg.webapp_url and cfg.webapp_secret:
-        start_webapp_server(
-            cfg.webapp_secret, cfg.webapp_port, lambda: mini_app_payload(cfg, db)
-        )
+        def get_payload():
+            # sqlite3 connections may only be used from the thread that
+            # created them; the webapp server runs its own background
+            # thread(s), so open (and close) a fresh connection per request
+            # rather than sharing the main thread's `db`.
+            webapp_db = Database(cfg.db_path)
+            try:
+                return mini_app_payload(cfg, webapp_db)
+            finally:
+                webapp_db.close()
+
+        start_webapp_server(cfg.webapp_secret, cfg.webapp_port, get_payload)
     if app.job_queue is not None:
         app.job_queue.run_repeating(send_due_reminders, interval=60, first=10)
     else:
