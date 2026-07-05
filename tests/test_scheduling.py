@@ -2,7 +2,13 @@ from datetime import date, datetime
 
 import pytest
 
-from bot.scheduling import available_slots, parse_time, parse_weekday
+from bot.scheduling import (
+    available_slots,
+    has_unexpired_recurring_booking,
+    is_reminder_due,
+    parse_time,
+    parse_weekday,
+)
 
 
 def test_parse_weekday_accepts_short_and_long_names():
@@ -122,3 +128,49 @@ def test_available_slots_merges_recurring_and_one_time_on_same_day():
         (1, "10:00"),
         (9, "16:00"),
     ]
+
+
+def _booking(day_iso, start_time, duration=60):
+    return {"date": day_iso, "start_time": start_time, "duration_min": duration}
+
+
+def test_has_unexpired_recurring_booking_blocks_next_week_before_current_ends():
+    # this week's occurrence hasn't started yet (NOW is 2026-07-06 08:00, session at 10:00)
+    existing = [_booking("2026-07-06", "10:00", 60)]
+    assert has_unexpired_recurring_booking(existing, date(2026, 7, 13), NOW) is True
+
+
+def test_has_unexpired_recurring_booking_allows_after_current_ends():
+    # this week's occurrence already ended (10:00-11:00, now is 12:00)
+    existing = [_booking("2026-07-06", "10:00", 60)]
+    later_now = datetime(2026, 7, 6, 12, 0)
+    assert has_unexpired_recurring_booking(existing, date(2026, 7, 13), later_now) is False
+
+
+def test_has_unexpired_recurring_booking_ignores_the_same_date():
+    existing = [_booking("2026-07-06", "10:00", 60)]
+    assert has_unexpired_recurring_booking(existing, date(2026, 7, 6), NOW) is False
+
+
+def test_has_unexpired_recurring_booking_true_with_no_bookings():
+    assert has_unexpired_recurring_booking([], date(2026, 7, 13), NOW) is False
+
+
+def _reminder(day_iso, start_time, offset_minutes):
+    return {"date": day_iso, "start_time": start_time, "offset_minutes": offset_minutes}
+
+
+def test_is_reminder_due_true_at_trigger_point():
+    reminder = _reminder("2026-07-06", "10:00", 60)  # 1 hour before
+    assert is_reminder_due(reminder, datetime(2026, 7, 6, 9, 0)) is True
+
+
+def test_is_reminder_due_false_before_trigger_point():
+    reminder = _reminder("2026-07-06", "10:00", 60)
+    assert is_reminder_due(reminder, datetime(2026, 7, 6, 8, 59)) is False
+
+
+def test_is_reminder_due_false_after_session_started():
+    # bot was down and only came back after the session already began; skip it
+    reminder = _reminder("2026-07-06", "10:00", 60)
+    assert is_reminder_due(reminder, datetime(2026, 7, 6, 10, 0)) is False

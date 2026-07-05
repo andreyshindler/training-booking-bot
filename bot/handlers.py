@@ -27,10 +27,12 @@ from telegram.ext import (
 )
 
 from .config import Config
-from .db import Database, SlotFullError, SlotTakenError
+from .db import AlreadyWaitlistedError, Database, SlotFullError, SlotTakenError
 from .scheduling import (
+    REMINDER_OFFSETS,
     WEEKDAY_NAMES_HE,
     available_slots,
+    has_unexpired_recurring_booking,
     hebrew_day_label,
     parse_time,
     parse_weekday,
@@ -231,26 +233,57 @@ async def book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _reminder_keyboard(db: Database, booking_id: int, extra_rows=None) -> InlineKeyboardMarkup:
+    active = {r["offset_minutes"] for r in db.reminders_for_booking(booking_id)}
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                ("☑️ " if minutes in active else "⬜ ") + f"{noun} לפני",
+                callback_data=f"remindtoggle|{booking_id}|{minutes}",
+            )
+        ]
+        for minutes, noun in REMINDER_OFFSETS
+    ]
+    if extra_rows:
+        keyboard.extend(extra_rows)
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _my_bookings_keyboard(rows, waiting=()) -> InlineKeyboardMarkup:
+    keyboard = []
+    for row in rows:
+        keyboard.append(
+            [InlineKeyboardButton(f"⏰ תזכורות — {_fmt_booking(row)}", callback_data=f"remindopen|{row['id']}")]
+        )
+        keyboard.append(
+            [InlineKeyboardButton("❌ ביטול", callback_data=f"cancel|{row['id']}")]
+        )
+    for row in waiting:
+        day = date.fromisoformat(row["date"])
+        label = hebrew_day_label(day, row["start_time"], row["duration_min"])
+        keyboard.append(
+            [InlineKeyboardButton(f"⏳ בהמתנה: {label}", callback_data="noop")]
+        )
+        keyboard.append(
+            [InlineKeyboardButton("❌ עזיבת רשימת המתנה", callback_data=f"waitlistleave|{row['id']}")]
+        )
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = _db(context)
-    rows = db.bookings_for_user(update.effective_user.id, _now(context).date())
-    if not rows:
+    user_id = update.effective_user.id
+    today = _now(context).date()
+    rows = db.bookings_for_user(user_id, today)
+    waiting = db.waitlist_for_user(user_id, today)
+    if not rows and not waiting:
         await update.message.reply_text(
             f"אין לכם אימונים קרובים. להזמנה: {BTN_BOOK}"
         )
         return
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                f"❌ ביטול {_fmt_booking(row)}",
-                callback_data=f"cancel|{row['id']}",
-            )
-        ]
-        for row in rows
-    ]
     await update.message.reply_text(
-        "האימונים הקרובים שלכם — לחצו כדי לבטל:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "האימונים הקרובים שלכם — לחצו לביטול או לניהול תזכורות:",
+        reply_markup=_my_bookings_keyboard(rows, waiting),
     )
 
 
@@ -346,10 +379,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_roster(query, context, payload)
     elif action == "rosterback":
         await _handle_roster_back(query, context)
+    elif action == "waitlistjoin":
+        await _handle_waitlist_join(query, context, payload)
+    elif action == "waitlistskip":
+        await query.edit_message_text("בסדר, אין בעיה. אפשר לנסות מועד אחר עם /book.")
+    elif action == "waitlistleave":
+        await _handle_waitlist_leave(query, context, payload)
+    elif action == "remindopen":
+        await _handle_remind_open(query, context, payload)
+    elif action == "remindback":
+        await _handle_remind_back(query, context)
+    elif action == "remindtoggle":
+        await _handle_remind_toggle(query, context, payload)
+
+
+def _recurring_conflict(db: Database, cfg: Config, slot, day: date, user_id: int) -> bool:
+    """True if booking ``day`` for this recurring slot would give the user a
+    second active (not-yet-ended) booking of it. One-time slots never conflict."""
+    if slot["date"] is not None:
+        return False
+    now = datetime.now(cfg.timezone).replace(tzinfo=None)
+    existing = db.bookings_for_user_and_slot(user_id, slot["id"])
+    return has_unexpired_recurring_booking(existing, day, now)
 
 
 async def _handle_book(query, context, payload: str) -> None:
-    db = _db(context)
+    db, cfg = _db(context), _cfg(context)
     slot_id_str, _, day_str = payload.partition("|")
     slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
     user = query.from_user
@@ -360,11 +415,30 @@ async def _handle_book(query, context, payload: str) -> None:
             "המועד הזה כבר לא קיים. נסו שוב עם /book."
         )
         return
-    try:
-        db.book(slot_id, day, user.id, _display_name(user))
-    except SlotFullError:
+
+    if _recurring_conflict(db, cfg, slot, day, user.id):
         await query.edit_message_text(
-            "מצטערים, כל המקומות תפוסים במועד הזה. בחרו מועד אחר עם /book."
+            "כבר יש לכם הרשמה למועד החוזר הזה. אפשר להירשם למועד הבא "
+            "רק אחרי שהאימון הנוכחי מסתיים."
+        )
+        return
+
+    try:
+        booking_id = db.book(slot_id, day, user.id, _display_name(user))
+    except SlotFullError:
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "✅ הצטרפות לרשימת המתנה",
+                    callback_data=f"waitlistjoin|{slot_id}|{day.isoformat()}",
+                )
+            ],
+            [InlineKeyboardButton("❌ לא, תודה", callback_data="waitlistskip")],
+        ]
+        await query.edit_message_text(
+            "מצטערים, כל המקומות תפוסים במועד הזה. להצטרף לרשימת המתנה? "
+            "אם יתפנה מקום תקבלו הודעה אוטומטית ותירשמו במקומו.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
     except SlotTakenError:
@@ -372,8 +446,120 @@ async def _handle_book(query, context, payload: str) -> None:
         return
 
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
-    await query.edit_message_text(f"✅ האימון נקבע: {label}\nנתראה באימון!")
+    await query.edit_message_text(
+        f"✅ האימון נקבע: {label}\nנתראה באימון!\n\n"
+        "אפשר להוסיף תזכורות (ניתן לבחור כמה, ולשנות בכל עת דרך "
+        f"{BTN_MY}):",
+        reply_markup=_reminder_keyboard(db, booking_id),
+    )
     await _notify_trainer(context, f"📅 הזמנה חדשה: {label} — {_display_name(user)}")
+
+
+async def _handle_waitlist_join(query, context, payload: str) -> None:
+    db, cfg = _db(context), _cfg(context)
+    slot_id_str, _, day_str = payload.partition("|")
+    slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
+    user = query.from_user
+
+    slot = db.get_slot(slot_id)
+    if slot is None:
+        await query.edit_message_text("המועד הזה כבר לא קיים. נסו שוב עם /book.")
+        return
+    if _recurring_conflict(db, cfg, slot, day, user.id):
+        await query.edit_message_text(
+            "כבר יש לכם הרשמה למועד החוזר הזה. אפשר להירשם למועד הבא "
+            "רק אחרי שהאימון הנוכחי מסתיים."
+        )
+        return
+
+    try:
+        # A spot may have opened up between the "it's full" message and this tap.
+        booking_id = db.book(slot_id, day, user.id, _display_name(user))
+    except SlotFullError:
+        pass
+    except SlotTakenError:
+        await query.edit_message_text("כבר נרשמתם למועד הזה.")
+        return
+    else:
+        label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
+        await query.edit_message_text(
+            f"התפנה מקום בינתיים! ✅ האימון נקבע: {label}\nנתראה באימון!\n\n"
+            "אפשר להוסיף תזכורות (ניתן לבחור כמה):",
+            reply_markup=_reminder_keyboard(db, booking_id),
+        )
+        await _notify_trainer(context, f"📅 הזמנה חדשה: {label} — {_display_name(user)}")
+        return
+
+    try:
+        db.join_waitlist(slot_id, day, user.id, _display_name(user))
+    except AlreadyWaitlistedError:
+        await query.edit_message_text("כבר נרשמתם לרשימת ההמתנה למועד הזה.")
+        return
+
+    label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
+    await query.edit_message_text(
+        f"✅ נרשמתם לרשימת ההמתנה: {label}\nאם יתפנה מקום, תקבלו הודעה אוטומטית."
+    )
+
+
+async def _handle_waitlist_leave(query, context, payload: str) -> None:
+    db = _db(context)
+    waitlist_id = int(payload)
+    entry = db.get_waitlist_entry(waitlist_id)
+    if entry is None or entry["user_id"] != query.from_user.id:
+        await query.edit_message_text("הרשומה לא נמצאה (ייתכן שכבר הוסרה).")
+        return
+    db.leave_waitlist(waitlist_id)
+    await query.edit_message_text("✅ הוסרתם מרשימת ההמתנה.")
+
+
+_BACK_TO_MY_BOOKINGS = [InlineKeyboardButton("🔙 חזרה לאימונים שלי", callback_data="remindback")]
+
+
+async def _handle_remind_open(query, context, payload: str) -> None:
+    db = _db(context)
+    booking_id = int(payload)
+    row = db.get_booking(booking_id)
+    if row is None or row["user_id"] != query.from_user.id:
+        await query.edit_message_text("ההזמנה לא נמצאה (ייתכן שכבר בוטלה).")
+        return
+    await query.edit_message_text(
+        f"תזכורות עבור {_fmt_booking(row)}:\nבחרו מתי לקבל תזכורת (אפשר כמה):",
+        reply_markup=_reminder_keyboard(db, booking_id, [_BACK_TO_MY_BOOKINGS]),
+    )
+
+
+async def _handle_remind_back(query, context) -> None:
+    db = _db(context)
+    user_id = query.from_user.id
+    today = _now(context).date()
+    rows = db.bookings_for_user(user_id, today)
+    waiting = db.waitlist_for_user(user_id, today)
+    if not rows and not waiting:
+        await query.edit_message_text(f"אין לכם אימונים קרובים. להזמנה: {BTN_BOOK}")
+        return
+    await query.edit_message_text(
+        "האימונים הקרובים שלכם — לחצו לביטול או לניהול תזכורות:",
+        reply_markup=_my_bookings_keyboard(rows, waiting),
+    )
+
+
+async def _handle_remind_toggle(query, context, payload: str) -> None:
+    db = _db(context)
+    booking_id_str, _, minutes_str = payload.partition("|")
+    booking_id, minutes = int(booking_id_str), int(minutes_str)
+    row = db.get_booking(booking_id)
+    if row is None or row["user_id"] != query.from_user.id:
+        await query.answer("ההזמנה לא נמצאה.", show_alert=True)
+        return
+    db.toggle_reminder(booking_id, minutes)
+    has_back = any(
+        btn.callback_data == "remindback"
+        for keyboard_row in query.message.reply_markup.inline_keyboard
+        for btn in keyboard_row
+    )
+    extra = [_BACK_TO_MY_BOOKINGS] if has_back else None
+    await query.edit_message_reply_markup(reply_markup=_reminder_keyboard(db, booking_id, extra))
 
 
 async def _handle_cancel(query, context, payload: str) -> None:
@@ -392,8 +578,23 @@ async def _handle_cancel(query, context, payload: str) -> None:
     if not is_trainer:
         await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
 
+    promotion = db.promote_next_waitlisted(row["slot_id"], date.fromisoformat(row["date"]))
+    if promotion is not None:
+        promoted, promoted_booking_id = promotion
+        try:
+            await context.bot.send_message(
+                promoted["user_id"],
+                f"🎉 התפנה מקום ונרשמתם אוטומטית לאימון: {label}\nנתראה באימון!\n\n"
+                "אפשר להוסיף תזכורות (ניתן לבחור כמה):",
+                reply_markup=_reminder_keyboard(db, promoted_booking_id),
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Could not notify waitlisted user %s: %s", promoted["user_id"], exc
+            )
 
-def _session_keyboard(rows) -> InlineKeyboardMarkup:
+
+def _session_keyboard(db: Database, rows) -> InlineKeyboardMarkup:
     """One button per (slot, date) session, grouping the flat booking rows."""
     keyboard = []
     seen = set()
@@ -405,6 +606,9 @@ def _session_keyboard(rows) -> InlineKeyboardMarkup:
         count = sum(1 for r in rows if (r["slot_id"], r["date"]) == key)
         day = date.fromisoformat(row["date"])
         label = hebrew_day_label(day, row["start_time"], row["duration_min"], row["capacity"], count)
+        waiting_count = len(db.waitlist_for_slot(row["slot_id"], day))
+        if waiting_count:
+            label += f" · {waiting_count} בהמתנה"
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"roster|{row['slot_id']}|{row['date']}")]
         )
@@ -420,26 +624,31 @@ async def _handle_roster(query, context, payload: str) -> None:
     if slot is None or not participants:
         await query.edit_message_text("ההרשמות למועד הזה כבר לא זמינות.")
         return
+    waiting = db.waitlist_for_slot(slot_id, day)
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"], slot["capacity"], len(participants))
+    if waiting:
+        label += f" · {len(waiting)} בהמתנה"
     keyboard = [
         [InlineKeyboardButton(f"❌ {row['user_name']}", callback_data=f"cancel|{row['id']}")]
         for row in participants
     ]
     keyboard.append([InlineKeyboardButton("🔙 חזרה לרשימה", callback_data="rosterback")])
-    await query.edit_message_text(
-        f"משתתפים ב{label}:\n(לחצו על שם כדי לבטל את ההרשמה שלו)",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    text = f"משתתפים ב{label}:\n(לחצו על שם כדי לבטל את ההרשמה שלו)"
+    if waiting:
+        names = ", ".join(row["user_name"] for row in waiting)
+        text += f"\n\nרשימת המתנה: {names}"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _handle_roster_back(query, context) -> None:
-    rows = _db(context).bookings_from(_now(context).date())
+    db = _db(context)
+    rows = db.bookings_from(_now(context).date())
     if not rows:
         await query.edit_message_text("אין אימונים קרובים.")
         return
     await query.edit_message_text(
         "האימונים הקרובים — לחצו על מועד לצפייה במשתתפים ולביטול:",
-        reply_markup=_session_keyboard(rows),
+        reply_markup=_session_keyboard(db, rows),
     )
 
 
@@ -543,13 +752,14 @@ async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
-    rows = _db(context).bookings_from(_now(context).date())
+    db = _db(context)
+    rows = db.bookings_from(_now(context).date())
     if not rows:
         await update.message.reply_text("אין אימונים קרובים.")
         return
     await update.message.reply_text(
         "האימונים הקרובים — לחצו על מועד לצפייה במשתתפים ולביטול:",
-        reply_markup=_session_keyboard(rows),
+        reply_markup=_session_keyboard(db, rows),
     )
 
 

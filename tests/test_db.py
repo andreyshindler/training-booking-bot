@@ -1,8 +1,8 @@
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
-from bot.db import Database, SlotFullError, SlotTakenError
+from bot.db import AlreadyWaitlistedError, Database, SlotFullError, SlotTakenError
 
 
 @pytest.fixture
@@ -197,3 +197,103 @@ def test_one_time_slot_removal_cancels_bookings(db):
     db.book(slot_id, date(2026, 7, 8), 111, "Alice")
     db.remove_slot(slot_id)
     assert db.bookings_from(date(2026, 1, 1)) == []
+
+
+def test_bookings_for_user_and_slot(db):
+    slot_id = db.add_slot(0, "10:00", 60, capacity=5)
+    other_slot_id = db.add_slot(2, "10:00", 60, capacity=5)
+    db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.book(slot_id, date(2026, 7, 13), 111, "Alice")
+    db.book(other_slot_id, date(2026, 7, 8), 111, "Alice")  # different slot, excluded
+    db.book(slot_id, date(2026, 7, 6), 222, "Bob")  # different user, excluded
+    rows = db.bookings_for_user_and_slot(111, slot_id)
+    assert sorted(r["date"] for r in rows) == ["2026-07-06", "2026-07-13"]
+
+
+# --- waiting list ---
+
+
+def test_join_waitlist_and_duplicate_rejected(db):
+    slot_id = db.add_slot(0, "10:00")
+    day = date(2026, 7, 6)
+    db.join_waitlist(slot_id, day, 111, "Alice")
+    with pytest.raises(AlreadyWaitlistedError):
+        db.join_waitlist(slot_id, day, 111, "Alice")
+    assert len(db.waitlist_for_slot(slot_id, day)) == 1
+
+
+def test_leave_waitlist(db):
+    slot_id = db.add_slot(0, "10:00")
+    day = date(2026, 7, 6)
+    entry_id = db.join_waitlist(slot_id, day, 111, "Alice")
+    assert db.leave_waitlist(entry_id) is True
+    assert db.leave_waitlist(entry_id) is False
+    assert db.waitlist_for_slot(slot_id, day) == []
+
+
+def test_promote_next_waitlisted_books_earliest_in_line(db):
+    slot_id = db.add_slot(0, "10:00")  # capacity 1
+    day = date(2026, 7, 6)
+    booking_id = db.book(slot_id, day, 111, "Alice")
+    db.join_waitlist(slot_id, day, 222, "Bob")
+    db.join_waitlist(slot_id, day, 333, "Carol")
+
+    db.cancel_booking(booking_id)
+    promotion = db.promote_next_waitlisted(slot_id, day)
+    assert promotion is not None
+    entry, new_booking_id = promotion
+    assert entry["user_name"] == "Bob"
+    roster = db.bookings_for_slot(slot_id, day)
+    assert [r["user_name"] for r in roster] == ["Bob"]
+    # Carol is still waiting; Bob is gone from the waitlist
+    assert [r["user_name"] for r in db.waitlist_for_slot(slot_id, day)] == ["Carol"]
+
+
+def test_promote_next_waitlisted_returns_none_when_empty(db):
+    slot_id = db.add_slot(0, "10:00")
+    assert db.promote_next_waitlisted(slot_id, date(2026, 7, 6)) is None
+
+
+def test_waitlist_for_user_and_prune_stale(db):
+    slot_id = db.add_slot(0, "10:00")
+    db.join_waitlist(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.join_waitlist(slot_id, date(2020, 1, 1), 111, "Alice")  # stale, different slot instance
+    assert len(db.waitlist_for_user(111, date(2026, 1, 1))) == 1
+    db.prune_stale_waitlist(date(2026, 1, 1))
+    assert len(db.waitlist_for_user(111, date(2020, 1, 1))) == 1  # only the future one survives
+
+
+# --- per-booking reminders ---
+
+
+def test_toggle_reminder_on_and_off(db):
+    slot_id = db.add_slot(0, "10:00")
+    booking_id = db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    assert db.toggle_reminder(booking_id, 60) is True
+    assert {r["offset_minutes"] for r in db.reminders_for_booking(booking_id)} == {60}
+    assert db.toggle_reminder(booking_id, 60) is False
+    assert db.reminders_for_booking(booking_id) == []
+
+
+def test_due_reminders_and_mark_sent(db):
+    slot_id = db.add_slot(0, "10:00")  # session at 10:00
+    booking_id = db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.toggle_reminder(booking_id, 60)  # 1 hour before -> due at 09:00
+
+    not_yet = db.due_reminders(datetime(2026, 7, 6, 8, 59))
+    assert not_yet == []
+
+    due = db.due_reminders(datetime(2026, 7, 6, 9, 0))
+    assert len(due) == 1
+    assert due[0]["user_id"] == 111
+    db.mark_reminder_sent(due[0]["reminder_id"])
+
+    assert db.due_reminders(datetime(2026, 7, 6, 9, 30)) == []
+
+
+def test_reminders_cascade_deleted_with_booking(db):
+    slot_id = db.add_slot(0, "10:00")
+    booking_id = db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    db.toggle_reminder(booking_id, 60)
+    db.cancel_booking(booking_id)
+    assert db.reminders_for_booking(booking_id) == []

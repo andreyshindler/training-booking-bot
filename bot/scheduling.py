@@ -43,6 +43,48 @@ def parse_time(text: str) -> str:
     return f"{int(match.group(1)):02d}:{match.group(2)}"
 
 
+# Reminder offsets in minutes before a session, with their Hebrew noun (the
+# caller adds the appropriate preposition: "X לפני" on a button, "בעוד X" in
+# a reminder message).
+REMINDER_OFFSETS = [(1440, "יום"), (120, "שעתיים"), (60, "שעה")]
+
+
+def combine_day_time(day: date, start_time: str) -> datetime:
+    hour, minute = map(int, start_time.split(":"))
+    return datetime.combine(day, time(hour, minute))
+
+
+def slot_end_dt(row) -> datetime:
+    """``row`` needs date/start_time/duration_min keys (a booking joined with its slot)."""
+    day = date.fromisoformat(row["date"])
+    return combine_day_time(day, row["start_time"]) + timedelta(minutes=row["duration_min"])
+
+
+def has_unexpired_recurring_booking(existing_bookings, target_day: date, now: datetime) -> bool:
+    """True if any of ``existing_bookings`` (rows with date/start_time/duration_min,
+    all for the same recurring slot) is for a date other than ``target_day`` and
+    hasn't ended yet. Used to block booking next week's occurrence of a recurring
+    slot while the current one is still active.
+    """
+    for row in existing_bookings:
+        if row["date"] == target_day.isoformat():
+            continue
+        if slot_end_dt(row) > now:
+            return True
+    return False
+
+
+def is_reminder_due(row, now: datetime) -> bool:
+    """``row`` needs date/start_time/offset_minutes keys. Due once the trigger
+    point (session start minus the offset) has been reached, but only before
+    the session itself has started (a reminder missed while the bot was down
+    is simply skipped rather than sent late).
+    """
+    start_dt = combine_day_time(date.fromisoformat(row["date"]), row["start_time"])
+    trigger_at = start_dt - timedelta(minutes=row["offset_minutes"])
+    return trigger_at <= now < start_dt
+
+
 def hebrew_day_label(
     day: date, start_time: str, duration_min: int, capacity: int = 1, booked_count: int = 0
 ) -> str:

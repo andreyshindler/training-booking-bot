@@ -5,11 +5,20 @@
 A Telegram bot that lets a trainer's clients book training sessions from the
 trainer's predefined weekly schedule.
 
-- The **trainer** (admin) defines a weekly schedule of slots, e.g. "Mon 10:00,
-  60 min".
+- The **trainer** (admin) defines a weekly recurring schedule of slots (e.g.
+  "Mon 10:00, 60 min", optionally with room for several participants) and can
+  also add one-time (non-recurring) lessons for a specific date via the mini
+  app's calendar.
 - **Trainees** run `/book`, see the open slots for the next N days as buttons,
-  and tap one to book it. Each slot can be booked by exactly one person per
-  date; double bookings are rejected atomically at the database level.
+  and tap one to book it. A slot can hold as many participants as its
+  capacity allows; once full, trainees can join a waiting list and are
+  automatically booked (with a notification) the moment someone cancels.
+  A trainee can hold only one active booking of a given recurring slot at a
+  time — they can book the next week's occurrence only after the current
+  one has ended.
+- Trainees can set optional reminders per booking (1 day / 2 hours / 1 hour
+  before, any combination), managed right after booking or later from
+  `/mybookings`.
 - The trainer gets a Telegram notification for every booking and cancellation.
 - The bot speaks **Hebrew**: all messages, dates, and button labels are in
   Hebrew, and the ☰ commands menu is registered automatically with Hebrew
@@ -23,17 +32,17 @@ Trainee:
 
 | Command | Description |
 |---|---|
-| `/book` | Show open slots for the coming week and book one |
-| `/mybookings` | List your upcoming sessions, with cancel buttons |
+| `/book` | Show open slots for the coming week and book one (or join the waiting list if full) |
+| `/mybookings` | List your upcoming sessions and waitlist entries — cancel, leave, or manage reminders |
 
 Trainer only:
 
 | Command | Description |
 |---|---|
-| `/addslot <day> <HH:MM> [minutes]` | Add a weekly slot, e.g. `/addslot Mon 10:00 60` |
-| `/delslot <id>` | Remove a weekly slot (ids shown by `/schedule`) |
-| `/schedule` | Show the weekly schedule |
-| `/bookings` | List all upcoming booked sessions |
+| `/addslot <day> <HH:MM> [minutes] [participants]` | Add a weekly slot, e.g. `/addslot Mon 10:00 60 5` |
+| `/delslot <id>` | Remove a slot, recurring or one-time (ids shown by `/schedule`) |
+| `/schedule` | Show the weekly schedule and upcoming one-time lessons |
+| `/bookings` | Tappable list of upcoming sessions — view each session's roster and waiting list, cancel a participant |
 
 ## Buttons instead of commands
 
@@ -44,10 +53,12 @@ is configured — `⚙️ עריכת המערכת`.
 
 ## Schedule-editing mini app (trainer)
 
-`docs/index.html` is a Telegram Mini App: a Hebrew, RTL, touch-friendly screen
-for editing the weekly schedule (add a slot with day/time/duration pickers,
-delete with a tap, save). It is a static page — Telegram passes the result
-back to the bot, so no extra server is needed. To enable it:
+`docs/index.html` is a Telegram Mini App: a Hebrew, RTL, touch-friendly weekly
+calendar (page through weeks with ‹ ›, up to a year ahead) for managing
+lessons — day/time/duration/participant-count pickers, and a toggle for
+recurring (repeats every week) vs one-time (that date only). It is a static
+page — Telegram passes the result back to the bot, so no extra server is
+needed. To enable it:
 
 1. Serve `docs/` over HTTPS. Easiest: GitHub → repo **Settings → Pages →
    Source: Deploy from a branch → `main` / `docs`** → Save. After a minute the
@@ -55,8 +66,8 @@ back to the bot, so no extra server is needed. To enable it:
 2. Put that URL in `.env`: `WEBAPP_URL=https://<username>.github.io/training-booking-bot/`
 3. Restart the bot. The trainer's keyboard now shows `⚙️ עריכת המערכת`, which
    opens the mini app pre-filled with the current schedule. Saving replaces the
-   schedule: new slots are added, missing ones removed (their future bookings
-   are cancelled), duration changes keep existing bookings.
+   schedule: new lessons are added, missing ones removed (their future bookings
+   are cancelled), duration/capacity changes keep existing bookings.
 
 ## Setup
 

@@ -1,7 +1,9 @@
 """SQLite storage for schedule slots and bookings."""
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
+
+from .scheduling import is_reminder_due
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS slots (
@@ -21,6 +23,22 @@ CREATE TABLE IF NOT EXISTS bookings (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (slot_id, date, user_id)
 );
+CREATE TABLE IF NOT EXISTS waitlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot_id INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    user_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (slot_id, date, user_id)
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+    offset_minutes INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (booking_id, offset_minutes)
+);
 """
 
 
@@ -30,6 +48,10 @@ class SlotTakenError(Exception):
 
 class SlotFullError(Exception):
     """Raised when the slot's capacity is already reached for that date."""
+
+
+class AlreadyWaitlistedError(Exception):
+    """Raised when this user is already on the waiting list for this slot/date."""
 
 
 class Database:
@@ -309,3 +331,121 @@ class Database:
             (from_day.isoformat(),),
         ).fetchall()
         return {(row["slot_id"], row["date"]): row["c"] for row in rows}
+
+    def bookings_for_user_and_slot(self, user_id: int, slot_id: int) -> list[sqlite3.Row]:
+        """All of one user's bookings (any date) for one recurring slot, used to
+        enforce that they hold only one active booking of it at a time."""
+        return self.conn.execute(
+            "SELECT b.*, s.start_time, s.duration_min FROM bookings b "
+            "JOIN slots s ON s.id = b.slot_id "
+            "WHERE b.user_id = ? AND b.slot_id = ?",
+            (user_id, slot_id),
+        ).fetchall()
+
+    # --- waiting list (for full sessions) ---
+
+    def join_waitlist(self, slot_id: int, day: date, user_id: int, user_name: str) -> int:
+        try:
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO waitlist (slot_id, date, user_id, user_name) "
+                    "VALUES (?, ?, ?, ?)",
+                    (slot_id, day.isoformat(), user_id, user_name),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise AlreadyWaitlistedError(
+                f"User {user_id} already waitlisted for slot {slot_id} on {day}"
+            ) from exc
+        return cur.lastrowid
+
+    def get_waitlist_entry(self, waitlist_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM waitlist WHERE id = ?", (waitlist_id,)
+        ).fetchone()
+
+    def leave_waitlist(self, waitlist_id: int) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM waitlist WHERE id = ?", (waitlist_id,))
+        return cur.rowcount > 0
+
+    def waitlist_for_slot(self, slot_id: int, day: date) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM waitlist WHERE slot_id = ? AND date = ? ORDER BY created_at",
+            (slot_id, day.isoformat()),
+        ).fetchall()
+
+    def waitlist_for_user(self, user_id: int, from_day: date) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT w.*, s.start_time, s.duration_min FROM waitlist w "
+            "JOIN slots s ON s.id = w.slot_id "
+            "WHERE w.user_id = ? AND w.date >= ? "
+            "ORDER BY w.date, s.start_time",
+            (user_id, from_day.isoformat()),
+        ).fetchall()
+
+    def promote_next_waitlisted(self, slot_id: int, day: date) -> tuple[sqlite3.Row, int] | None:
+        """Pop the earliest waitlisted user for this session and book them.
+
+        Returns (waitlist_row, new_booking_id), or None if nobody was waiting.
+        If booking the next-in-line somehow fails (edge case), tries the one
+        after them instead.
+        """
+        while True:
+            entry = self.conn.execute(
+                "SELECT * FROM waitlist WHERE slot_id = ? AND date = ? "
+                "ORDER BY created_at LIMIT 1",
+                (slot_id, day.isoformat()),
+            ).fetchone()
+            if entry is None:
+                return None
+            with self.conn:
+                self.conn.execute("DELETE FROM waitlist WHERE id = ?", (entry["id"],))
+            try:
+                booking_id = self.book(slot_id, day, entry["user_id"], entry["user_name"])
+            except (SlotFullError, SlotTakenError):
+                continue
+            return entry, booking_id
+
+    def prune_stale_waitlist(self, today: date) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM waitlist WHERE date < ?", (today.isoformat(),))
+
+    # --- per-booking reminders ---
+
+    def reminders_for_booking(self, booking_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM reminders WHERE booking_id = ?", (booking_id,)
+        ).fetchall()
+
+    def toggle_reminder(self, booking_id: int, offset_minutes: int) -> bool:
+        """Flip one reminder on/off for a booking. Returns the new state (True = on)."""
+        existing = self.conn.execute(
+            "SELECT id FROM reminders WHERE booking_id = ? AND offset_minutes = ?",
+            (booking_id, offset_minutes),
+        ).fetchone()
+        with self.conn:
+            if existing:
+                self.conn.execute("DELETE FROM reminders WHERE id = ?", (existing["id"],))
+            else:
+                self.conn.execute(
+                    "INSERT INTO reminders (booking_id, offset_minutes) VALUES (?, ?)",
+                    (booking_id, offset_minutes),
+                )
+        return existing is None
+
+    def due_reminders(self, now: datetime) -> list[sqlite3.Row]:
+        """Not-yet-sent reminders whose trigger time has been reached."""
+        candidates = self.conn.execute(
+            "SELECT r.id AS reminder_id, r.offset_minutes, b.user_id, b.date, "
+            "s.start_time, s.duration_min "
+            "FROM reminders r "
+            "JOIN bookings b ON b.id = r.booking_id "
+            "JOIN slots s ON s.id = b.slot_id "
+            "WHERE r.sent = 0 AND b.date >= ?",
+            (now.date().isoformat(),),
+        ).fetchall()
+        return [row for row in candidates if is_reminder_due(row, now)]
+
+    def mark_reminder_sent(self, reminder_id: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (reminder_id,))
