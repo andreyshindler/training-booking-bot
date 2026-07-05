@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Run tests
-        run: pytest -v
+        run: python -m pytest -v
       - name: Import smoke test
         run: python -c "import bot.handlers, bot.main; print('imports OK')"
 
