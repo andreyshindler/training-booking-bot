@@ -14,13 +14,14 @@ def server():
     srv.server_close()
 
 
-def _get(server, token=None):
+def _get(server, token=None, method="GET"):
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     if token is not None:
         url += f"?token={token}"
+    req = urllib.request.Request(url, method=method)
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -40,3 +41,13 @@ def test_correct_token_serves_mini_app(server):
     status, body = _get(server, token="s3cr3t")
     assert status == 200
     assert "עריכת המערכת".encode("utf-8") in body
+
+
+def test_head_request_supported(server):
+    # curl -I sends HEAD; must not 501 the way an unhandled method would.
+    status, body = _get(server, token="s3cr3t", method="HEAD")
+    assert status == 200
+    assert body == b""
+
+    status, body = _get(server, method="HEAD")
+    assert status == 403

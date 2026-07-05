@@ -26,21 +26,32 @@ def _make_handler(secret: str, html: bytes):
             # includes the full request line).
             logger.info("webapp_server: %s %s", self.command, getattr(self, "_status", "?"))
 
-        def do_GET(self):
+        def _authorized(self) -> bool:
             query = parse_qs(urlparse(self.path).query)
             token = query.get("token", [""])[0]
-            if not hmac.compare_digest(token, secret):
+            return hmac.compare_digest(token, secret)
+
+        def _respond(self, include_body: bool):
+            if not self._authorized():
                 self._status = 403
                 self.send_response(403)
                 self.end_headers()
-                self.wfile.write(b"Forbidden")
+                if include_body:
+                    self.wfile.write(b"Forbidden")
                 return
             self._status = 200
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
-            self.wfile.write(html)
+            if include_body:
+                self.wfile.write(html)
+
+        def do_GET(self):
+            self._respond(include_body=True)
+
+        def do_HEAD(self):
+            self._respond(include_body=False)
 
     return Handler
 
