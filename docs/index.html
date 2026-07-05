@@ -17,7 +17,8 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0;
+    margin: 0 auto;
+    max-width: 480px;
     padding: 16px 16px 96px;
     background: var(--bg);
     color: var(--fg);
@@ -89,7 +90,9 @@
     padding: 12px; font-size: 1rem; font-weight: 600; cursor: pointer;
   }
   #saveBtn {
-    position: fixed; bottom: 16px; right: 16px; left: 16px;
+    position: fixed; bottom: 16px;
+    left: 50%; transform: translateX(-50%);
+    width: calc(100% - 32px); max-width: 480px;
     border: none; border-radius: 12px;
     background: var(--accent); color: var(--accent-fg);
     padding: 14px; font-size: 1.05rem; font-weight: 700; cursor: pointer;
