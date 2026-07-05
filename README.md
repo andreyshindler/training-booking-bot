@@ -44,13 +44,21 @@ Trainer only:
 | `/schedule` | Show the weekly schedule and upcoming one-time lessons |
 | `/bookings` | Tappable list of upcoming sessions — view each session's roster and waiting list, cancel a participant |
 | `/webapplink` | The mini app link as plain text, so it can be opened in any browser (not just Telegram's in-app view) |
+| `/admins` | List the primary trainer and all additional admins |
+| `/addadmin <id>` | Grant another Telegram user full admin access (same as tapping ➕ הוספת מנהל) |
+| `/deladmin <id>` | Revoke an admin added this way (the primary `TRAINER_ID` can't be removed) |
+| `/auditlog` | Last 30 state-changing actions — bookings, cancellations, schedule edits, admin changes — with who did what and when |
+
+Any additional admin has the exact same permissions as the primary trainer,
+including adding/removing other admins. Admins are stored in the database
+(not `.env`), so they can be managed live without restarting the bot.
 
 ## Buttons instead of commands
 
 `/start` pins an always-visible button keyboard in the chat, so nobody has to
-type commands: trainees get `📅 הזמנת אימון` and `🗓 האימונים שלי`; the trainer
-additionally gets `📋 המערכת השבועית`, `👥 כל האימונים`, and — when the mini app
-is configured — `⚙️ עריכת המערכת`.
+type commands: trainees get `📅 הזמנת אימון` and `🗓 האימונים שלי`; every admin
+additionally gets `📋 המערכת השבועית`, `👥 כל האימונים`, `➕ הוספת מנהל`, and —
+when the mini app is configured — `⚙️ עריכת המערכת`.
 
 ## Schedule-editing mini app (trainer)
 

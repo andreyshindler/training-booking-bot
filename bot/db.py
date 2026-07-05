@@ -32,12 +32,26 @@ CREATE TABLE IF NOT EXISTS waitlist (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (slot_id, date, user_id)
 );
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    added_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
     offset_minutes INTEGER NOT NULL,
     sent INTEGER NOT NULL DEFAULT 0,
     UNIQUE (booking_id, offset_minutes)
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    user_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -449,3 +463,44 @@ class Database:
     def mark_reminder_sent(self, reminder_id: int) -> None:
         with self.conn:
             self.conn.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (reminder_id,))
+
+    # --- additional admins (beyond the .env-configured TRAINER_ID) ---
+
+    def add_admin(self, user_id: int, user_name: str, added_by: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO admins (user_id, user_name, added_by) VALUES (?, ?, ?) "
+                "ON CONFLICT (user_id) DO UPDATE SET user_name = excluded.user_name",
+                (user_id, user_name, added_by),
+            )
+
+    def remove_admin(self, user_id: int) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+        return cur.rowcount > 0
+
+    def is_admin(self, user_id: int) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM admins WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def list_admins(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM admins ORDER BY created_at").fetchall()
+
+    # --- audit log ---
+
+    def log_action(self, user_id: int, user_name: str, action: str, details: str = "") -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO audit_log (user_id, user_name, action, details) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, user_name, action, details),
+            )
+
+    def list_audit_log(self, limit: int = 50) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()

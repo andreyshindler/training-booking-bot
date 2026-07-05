@@ -157,9 +157,13 @@
   let recurringSlots = [];
   let oneTimeSlots = [];
   try {
-    const raw = new URLSearchParams(location.search).get("data");
-    if (raw) {
-      const parsed = JSON.parse(raw);
+    // Self-hosted (bot/webapp_server.py): the schedule is injected directly
+    // into the page per-request, so the URL only needs a short token.
+    // GitHub Pages (static hosting, no server logic): falls back to the
+    // schedule encoded in the URL's own "data" query param.
+    const parsed = window.__MINI_APP_DATA__ ||
+      JSON.parse(new URLSearchParams(location.search).get("data") || "null");
+    if (parsed) {
       recurringSlots = (parsed.recurring || []).map(s => ({
         weekday: Number(s.weekday),
         start_time: String(s.start_time),

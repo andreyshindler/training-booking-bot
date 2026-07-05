@@ -50,6 +50,7 @@ BTN_MY = "🗓 האימונים שלי"
 BTN_SCHEDULE = "📋 המערכת השבועית"
 BTN_ALL = "👥 כל האימונים"
 BTN_EDIT = "⚙️ עריכת המערכת"
+BTN_ADD_ADMIN = "➕ הוספת מנהל"
 
 # Telegram requires command names in Latin letters; the labels are Hebrew.
 TRAINEE_COMMANDS = [
@@ -63,17 +64,24 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("delslot", "מחיקת מועד שבועי"),
     BotCommand("bookings", "כל האימונים הקרובים"),
     BotCommand("webapplink", "קישור לעריכת המערכת בדפדפן"),
+    BotCommand("admins", "רשימת מנהלים"),
+    BotCommand("addadmin", "הוספת מנהל"),
+    BotCommand("deladmin", "הסרת מנהל"),
+    BotCommand("auditlog", "יומן פעולות"),
 ]
 
 
 async def setup_commands_menu(app: Application) -> None:
     """Register the ☰ menu commands: trainee set for everyone, full set for the trainer."""
     cfg: Config = app.bot_data[CFG]
+    db: Database = app.bot_data[DB]
     await app.bot.set_my_commands(TRAINEE_COMMANDS, scope=BotCommandScopeDefault())
-    # Telegram rejects chat-scoped commands ("Chat not found") until the trainer
+    # Telegram rejects chat-scoped commands ("Chat not found") until each admin
     # has opened a chat with the bot, so this must not be fatal; it is retried
-    # when the trainer sends /start.
+    # when that admin sends /start.
     await _set_trainer_menu(app.bot, cfg.trainer_id)
+    for row in db.list_admins():
+        await _set_trainer_menu(app.bot, row["user_id"])
 
 
 async def _set_trainer_menu(bot, trainer_id: int) -> bool:
@@ -100,8 +108,14 @@ def _cfg(context: ContextTypes.DEFAULT_TYPE) -> Config:
     return context.application.bot_data[CFG]
 
 
+def _is_trainer_id(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    if user_id == _cfg(context).trainer_id:
+        return True
+    return _db(context).is_admin(user_id)
+
+
 def _is_trainer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    return update.effective_user.id == _cfg(context).trainer_id
+    return _is_trainer_id(context, update.effective_user.id)
 
 
 def _now(context: ContextTypes.DEFAULT_TYPE) -> datetime:
@@ -111,6 +125,11 @@ def _now(context: ContextTypes.DEFAULT_TYPE) -> datetime:
 def _display_name(user) -> str:
     name = user.full_name or str(user.id)
     return f"{name} (@{user.username})" if user.username else name
+
+
+def _log(context: ContextTypes.DEFAULT_TYPE, user, action: str, details: str = "") -> None:
+    """Record a state-changing action to the audit log (see /auditlog)."""
+    _db(context).log_action(user.id, _display_name(user), action, details)
 
 
 async def _notify_trainer(context, text: str) -> None:
@@ -136,8 +155,8 @@ def _one_time_window(cfg: Config) -> tuple[date, date]:
     )
 
 
-def _webapp_edit_url(cfg: Config, db: Database) -> str:
-    """Mini-app URL carrying the current schedule, so the app opens pre-filled."""
+def mini_app_payload(cfg: Config, db: Database) -> dict:
+    """The current schedule, in the shape docs/index.html expects."""
     recurring = [
         {
             "weekday": row["weekday"],
@@ -157,18 +176,31 @@ def _webapp_edit_url(cfg: Config, db: Database) -> str:
         }
         for row in db.list_one_time_slots(from_day, to_day)
     ]
-    payload = {"recurring": recurring, "one_time": one_time}
+    return {"recurring": recurring, "one_time": one_time}
+
+
+def _webapp_edit_url(cfg: Config, db: Database) -> str:
+    """Mini-app URL, so the app opens pre-filled with the current schedule.
+
+    Self-hosted (webapp_secret set): the server injects the schedule itself
+    (see bot/webapp_server.py), so the URL only needs the short token — no
+    long encoded payload to carry around or paste.
+    Github Pages (no secret, purely static hosting): the page has no server
+    logic to fetch its own data from, so the schedule still has to travel in
+    the URL itself.
+    """
     separator = "&" if "?" in cfg.webapp_url else "?"
-    url = f"{cfg.webapp_url}{separator}data={quote(json.dumps(payload))}"
     if cfg.webapp_secret:
-        url += f"&token={quote(cfg.webapp_secret)}"
-    return url
+        return f"{cfg.webapp_url}{separator}token={quote(cfg.webapp_secret)}"
+    payload = mini_app_payload(cfg, db)
+    return f"{cfg.webapp_url}{separator}data={quote(json.dumps(payload))}"
 
 
 def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(BTN_BOOK), KeyboardButton(BTN_MY)]]
     if is_trainer:
         rows.append([KeyboardButton(BTN_SCHEDULE), KeyboardButton(BTN_ALL)])
+        rows.append([KeyboardButton(BTN_ADD_ADMIN)])
         cfg = _cfg(context)
         if cfg.webapp_url:
             rows.append(
@@ -187,13 +219,19 @@ def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> Repl
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_trainer = _is_trainer(update, context)
     if is_trainer:
-        # The chat now definitely exists, so the trainer menu can be registered.
-        await _set_trainer_menu(context.bot, _cfg(context).trainer_id)
+        # The chat now definitely exists, so this admin's menu can be registered.
+        await _set_trainer_menu(context.bot, update.effective_user.id)
+        db, cfg = _db(context), _cfg(context)
+        if update.effective_user.id != cfg.trainer_id and db.is_admin(update.effective_user.id):
+            # Refresh their display name now that we actually have it (they were
+            # added by numeric ID alone, before ever interacting with the bot).
+            db.add_admin(update.effective_user.id, _display_name(update.effective_user), added_by=cfg.trainer_id)
         text = (
             "שלום, המאמן! אפשר להשתמש בכפתורים למטה:\n"
             f"{BTN_EDIT} — עריכת המערכת השבועית במסך נוח\n"
             f"{BTN_SCHEDULE} — הצגת המערכת השבועית\n"
-            f"{BTN_ALL} — האימונים הקרובים שהוזמנו\n\n"
+            f"{BTN_ALL} — האימונים הקרובים שהוזמנו\n"
+            f"{BTN_ADD_ADMIN} — הוספת מנהל נוסף\n\n"
             "אפשר גם בפקודות: /addslot שני 10:00 60 או /delslot <מספר>"
         )
     else:
@@ -299,6 +337,9 @@ def _fmt_booking(row) -> str:
 # --- reply-keyboard button presses (arrive as plain text) ---
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.pop("awaiting_admin_id", False):
+        await _handle_admin_id_reply(update, context)
+        return
     text = (update.message.text or "").strip()
     if text == BTN_BOOK:
         await book(update, context)
@@ -308,6 +349,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await schedule(update, context)
     elif text == BTN_ALL:
         await bookings(update, context)
+    elif text == BTN_ADD_ADMIN:
+        await add_admin_prompt(update, context)
 
 
 # --- mini-app result (trainer saved the schedule in the web app) ---
@@ -363,6 +406,11 @@ async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
     if total_removed:
         summary += "\n(הזמנות עתידיות למועדים שנמחקו בוטלו.)"
+    _log(
+        context, update.effective_user,
+        "schedule_edit",
+        f"נוספו {total_added}, נמחקו {total_removed}, שונו {total_updated}",
+    )
     # Refresh the keyboard so the edit button carries the new schedule.
     await update.effective_message.reply_text(
         summary, reply_markup=_main_keyboard(context, is_trainer=True)
@@ -456,6 +504,7 @@ async def _handle_book(query, context, payload: str) -> None:
         f"{BTN_MY}):",
         reply_markup=_reminder_keyboard(db, booking_id),
     )
+    _log(context, user, "book", label)
     await _notify_trainer(context, f"📅 הזמנה חדשה: {label} — {_display_name(user)}")
 
 
@@ -491,6 +540,7 @@ async def _handle_waitlist_join(query, context, payload: str) -> None:
             "אפשר להוסיף תזכורות (ניתן לבחור כמה):",
             reply_markup=_reminder_keyboard(db, booking_id),
         )
+        _log(context, user, "book", label)
         await _notify_trainer(context, f"📅 הזמנה חדשה: {label} — {_display_name(user)}")
         return
 
@@ -501,6 +551,7 @@ async def _handle_waitlist_join(query, context, payload: str) -> None:
         return
 
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
+    _log(context, user, "waitlist_join", label)
     await query.edit_message_text(
         f"✅ נרשמתם לרשימת ההמתנה: {label}\nאם יתפנה מקום, תקבלו הודעה אוטומטית."
     )
@@ -514,6 +565,10 @@ async def _handle_waitlist_leave(query, context, payload: str) -> None:
         await query.edit_message_text("הרשומה לא נמצאה (ייתכן שכבר הוסרה).")
         return
     db.leave_waitlist(waitlist_id)
+    slot = db.get_slot(entry["slot_id"])
+    if slot is not None:
+        label = hebrew_day_label(date.fromisoformat(entry["date"]), slot["start_time"], slot["duration_min"])
+        _log(context, query.from_user, "waitlist_leave", label)
     await query.edit_message_text("✅ הוסרתם מרשימת ההמתנה.")
 
 
@@ -567,10 +622,10 @@ async def _handle_remind_toggle(query, context, payload: str) -> None:
 
 
 async def _handle_cancel(query, context, payload: str) -> None:
-    db, cfg = _db(context), _cfg(context)
+    db = _db(context)
     booking_id = int(payload)
     row = db.get_booking(booking_id)
-    is_trainer = query.from_user.id == cfg.trainer_id
+    is_trainer = _is_trainer_id(context, query.from_user.id)
     if row is None or (row["user_id"] != query.from_user.id and not is_trainer):
         await query.edit_message_text(
             "ההזמנה לא נמצאה (ייתכן שכבר בוטלה)."
@@ -579,6 +634,7 @@ async def _handle_cancel(query, context, payload: str) -> None:
     db.cancel_booking(booking_id)
     label = _fmt_booking(row)
     await query.edit_message_text(f"❌ האימון בוטל: {label}")
+    _log(context, query.from_user, "cancel", label)
     if not is_trainer:
         await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
 
@@ -596,6 +652,7 @@ async def _handle_cancel(query, context, payload: str) -> None:
             logger.warning(
                 "Could not notify waitlisted user %s: %s", promoted["user_id"], exc
             )
+        db.log_action(promoted["user_id"], promoted["user_name"], "waitlist_promoted", label)
 
 
 def _session_keyboard(db: Database, rows) -> InlineKeyboardMarkup:
@@ -694,9 +751,10 @@ async def add_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     extra = f", {capacity} משתתפים" if capacity > 1 else ""
+    slot_label = f"יום {WEEKDAY_NAMES_HE[weekday]} {start_time} ({duration} דק'{extra})"
+    _log(context, update.effective_user, "addslot", slot_label)
     await update.message.reply_text(
-        f"נוסף מועד #{slot_id}: יום {WEEKDAY_NAMES_HE[weekday]} "
-        f"{start_time} ({duration} דק'{extra})",
+        f"נוסף מועד #{slot_id}: {slot_label}",
         reply_markup=_main_keyboard(context, is_trainer=True),
     )
 
@@ -710,6 +768,8 @@ async def del_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     removed = _db(context).remove_slot(int(context.args[0]))
+    if removed:
+        _log(context, update.effective_user, "delslot", f"#{context.args[0]}")
     await update.message.reply_text(
         "המועד נמחק (הזמנות עתידיות למועד זה בוטלו)."
         if removed
@@ -775,11 +835,135 @@ async def webapp_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("לא הוגדר WEBAPP_URL. ראו .env.example.")
         return
     url = _webapp_edit_url(cfg, db)
+    if cfg.webapp_secret:
+        note = "הקישור קבוע ותמיד מציג את המערכת העדכנית — אין צורך לרענן אותו."
+    else:
+        note = "הקישור הזה כולל תמונת מצב של המערכת; לאחר עדכון שלחו /start לקבלת קישור חדש."
     await update.message.reply_text(
-        "קישור לעריכת המערכת — פותח בכל דפדפן (כולל במחשב), לא רק בטלגרם.\n"
-        "תקף עד השינוי הבא במערכת או שליחת /start (הקישור מתעדכן אז).\n\n"
-        f"{url}"
+        f"קישור לעריכת המערכת — פותח בכל דפדפן (כולל במחשב), לא רק בטלגרם.\n{note}\n\n{url}"
     )
+
+
+# --- managing additional admins ---
+
+async def _do_add_admin(context: ContextTypes.DEFAULT_TYPE, requester, new_id: int) -> str:
+    cfg, db = _cfg(context), _db(context)
+    if new_id == cfg.trainer_id or db.is_admin(new_id):
+        return "המשתמש הזה כבר מנהל."
+    db.add_admin(new_id, user_name=str(new_id), added_by=requester.id)
+    await _set_trainer_menu(context.bot, new_id)
+    _log(context, requester, "add_admin", f"ID: {new_id}")
+    try:
+        await context.bot.send_message(
+            new_id, "מוניתם כמנהל בבוט. שלחו /start כדי לראות את תפריט הניהול."
+        )
+    except TelegramError:
+        pass  # they haven't started a chat with the bot yet — they'll see the menu once they do
+    return f"✅ נוסף מנהל חדש (ID: {new_id})."
+
+
+async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    context.user_data["awaiting_admin_id"] = True
+    await update.message.reply_text(
+        "שלחו את המספר המזהה (ID) של המנהל החדש.\n"
+        "אפשר לקבל אותו מהמשתמש עצמו, למשל דרך @userinfobot."
+    )
+
+
+async def _handle_admin_id_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    text = (update.message.text or "").strip()
+    if not text.isdigit():
+        await update.message.reply_text(
+            f"זה לא נראה כמו מספר מזהה תקין. אפשר לנסות שוב עם {BTN_ADD_ADMIN}."
+        )
+        return
+    msg = await _do_add_admin(context, update.effective_user, int(text))
+    await update.message.reply_text(msg)
+
+
+async def add_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("שימוש: /addadmin <ID>")
+        return
+    msg = await _do_add_admin(context, update.effective_user, int(context.args[0]))
+    await update.message.reply_text(msg)
+
+
+async def del_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("שימוש: /deladmin <ID>")
+        return
+    target_id = int(context.args[0])
+    if target_id == _cfg(context).trainer_id:
+        await update.message.reply_text(
+            "לא ניתן להסיר את המנהל הראשי (מוגדר ב-TRAINER_ID ב-.env)."
+        )
+        return
+    db = _db(context)
+    removed = db.remove_admin(target_id)
+    if not removed:
+        await update.message.reply_text("לא נמצא מנהל עם המספר הזה.")
+        return
+    try:
+        await context.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=target_id))
+    except TelegramError:
+        pass
+    _log(context, update.effective_user, "remove_admin", f"ID: {target_id}")
+    await update.message.reply_text(f"✅ המנהל הוסר (ID: {target_id}).")
+    try:
+        await context.bot.send_message(target_id, "הוסרתם מרשימת המנהלים בבוט.")
+    except TelegramError:
+        pass
+
+
+async def list_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    cfg, db = _cfg(context), _db(context)
+    lines = [f"#{cfg.trainer_id} (מנהל ראשי, מוגדר ב-.env)"]
+    lines += [f"#{row['user_id']} — {row['user_name']}" for row in db.list_admins()]
+    await update.message.reply_text("מנהלים:\n" + "\n".join(lines))
+
+
+# --- audit log ---
+
+_ACTION_LABELS = {
+    "book": "הזמנת אימון",
+    "cancel": "ביטול אימון",
+    "waitlist_join": "הצטרפות לרשימת המתנה",
+    "waitlist_leave": "עזיבת רשימת המתנה",
+    "waitlist_promoted": "עלייה אוטומטית מרשימת המתנה",
+    "schedule_edit": "עריכת המערכת",
+    "addslot": "הוספת מועד",
+    "delslot": "מחיקת מועד",
+    "add_admin": "הוספת מנהל",
+    "remove_admin": "הסרת מנהל",
+}
+
+
+async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    rows = _db(context).list_audit_log(limit=30)
+    if not rows:
+        await update.message.reply_text("יומן הפעולות ריק.")
+        return
+    lines = []
+    for row in rows:
+        action = _ACTION_LABELS.get(row["action"], row["action"])
+        line = f"{row['created_at']} — {row['user_name']} ({row['user_id']}): {action}"
+        if row["details"]:
+            line += f" — {row['details']}"
+        lines.append(line)
+    await update.message.reply_text("יומן פעולות (30 אחרונות):\n" + "\n".join(lines))
 
 
 def register_handlers(app: Application) -> None:
@@ -792,6 +976,10 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("schedule", schedule))
     app.add_handler(CommandHandler("bookings", bookings))
     app.add_handler(CommandHandler("webapplink", webapp_link))
+    app.add_handler(CommandHandler("admins", list_admins_command))
+    app.add_handler(CommandHandler("addadmin", add_admin_command))
+    app.add_handler(CommandHandler("deladmin", del_admin_command))
+    app.add_handler(CommandHandler("auditlog", audit_log_command))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

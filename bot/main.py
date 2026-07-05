@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder
 
 from .config import load_config
 from .db import Database
-from .handlers import CFG, DB, register_handlers, setup_commands_menu
+from .handlers import CFG, DB, mini_app_payload, register_handlers, setup_commands_menu
 from .reminders import send_due_reminders
 from .webapp_server import start_webapp_server
 
@@ -23,11 +23,14 @@ def main() -> None:
         .post_init(setup_commands_menu)
         .build()
     )
-    app.bot_data[DB] = Database(cfg.db_path)
+    db = Database(cfg.db_path)
+    app.bot_data[DB] = db
     app.bot_data[CFG] = cfg
     register_handlers(app)
     if cfg.webapp_url and cfg.webapp_secret:
-        start_webapp_server(cfg.webapp_secret, cfg.webapp_port)
+        start_webapp_server(
+            cfg.webapp_secret, cfg.webapp_port, lambda: mini_app_payload(cfg, db)
+        )
     if app.job_queue is not None:
         app.job_queue.run_repeating(send_due_reminders, interval=60, first=10)
     else:

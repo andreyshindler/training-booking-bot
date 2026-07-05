@@ -297,3 +297,50 @@ def test_reminders_cascade_deleted_with_booking(db):
     db.toggle_reminder(booking_id, 60)
     db.cancel_booking(booking_id)
     assert db.reminders_for_booking(booking_id) == []
+
+
+# --- additional admins ---
+
+
+def test_add_list_remove_admin(db):
+    assert db.is_admin(555) is False
+    db.add_admin(555, "Bob", added_by=111)
+    assert db.is_admin(555) is True
+    assert [r["user_id"] for r in db.list_admins()] == [555]
+    assert db.remove_admin(555) is True
+    assert db.remove_admin(555) is False
+    assert db.is_admin(555) is False
+
+
+def test_add_admin_upserts_name(db):
+    db.add_admin(555, "555", added_by=111)
+    db.add_admin(555, "Bob Real Name", added_by=111)
+    rows = db.list_admins()
+    assert len(rows) == 1
+    assert rows[0]["user_name"] == "Bob Real Name"
+
+
+# --- audit log ---
+
+
+def test_log_action_and_list(db):
+    db.log_action(111, "Alice", "book", "Monday 10:00")
+    db.log_action(222, "Bob", "cancel", "Tuesday 11:00")
+    rows = db.list_audit_log()
+    # most recent first
+    assert [r["action"] for r in rows] == ["cancel", "book"]
+    assert rows[0]["user_name"] == "Bob"
+    assert rows[0]["details"] == "Tuesday 11:00"
+
+
+def test_log_action_details_default_empty(db):
+    db.log_action(111, "Alice", "add_admin")
+    assert db.list_audit_log()[0]["details"] == ""
+
+
+def test_list_audit_log_respects_limit(db):
+    for i in range(5):
+        db.log_action(111, "Alice", "book", str(i))
+    rows = db.list_audit_log(limit=3)
+    assert len(rows) == 3
+    assert rows[0]["details"] == "4"  # most recent first
