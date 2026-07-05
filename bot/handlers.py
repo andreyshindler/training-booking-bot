@@ -1,5 +1,6 @@
 """Telegram command and callback handlers (all user-facing text in Hebrew)."""
 
+import logging
 from datetime import date, datetime
 
 from telegram import (
@@ -10,6 +11,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -26,6 +28,8 @@ from .scheduling import (
     parse_time,
     parse_weekday,
 )
+
+logger = logging.getLogger(__name__)
 
 # keys used in application.bot_data
 DB = "db"
@@ -49,9 +53,26 @@ async def setup_commands_menu(app: Application) -> None:
     """Register the ☰ menu commands: trainee set for everyone, full set for the trainer."""
     cfg: Config = app.bot_data[CFG]
     await app.bot.set_my_commands(TRAINEE_COMMANDS, scope=BotCommandScopeDefault())
-    await app.bot.set_my_commands(
-        TRAINER_COMMANDS, scope=BotCommandScopeChat(chat_id=cfg.trainer_id)
-    )
+    # Telegram rejects chat-scoped commands ("Chat not found") until the trainer
+    # has opened a chat with the bot, so this must not be fatal; it is retried
+    # when the trainer sends /start.
+    await _set_trainer_menu(app.bot, cfg.trainer_id)
+
+
+async def _set_trainer_menu(bot, trainer_id: int) -> bool:
+    try:
+        await bot.set_my_commands(
+            TRAINER_COMMANDS, scope=BotCommandScopeChat(chat_id=trainer_id)
+        )
+        return True
+    except TelegramError as exc:
+        logger.warning(
+            "Could not register the trainer commands menu (%s). "
+            "The trainer should open the bot and press Start; "
+            "the menu will be registered then.",
+            exc,
+        )
+        return False
 
 
 def _db(context: ContextTypes.DEFAULT_TYPE) -> Database:
@@ -75,10 +96,20 @@ def _display_name(user) -> str:
     return f"{name} (@{user.username})" if user.username else name
 
 
+async def _notify_trainer(context, text: str) -> None:
+    """Best-effort notification; must never break the trainee's flow."""
+    try:
+        await context.bot.send_message(_cfg(context).trainer_id, text)
+    except TelegramError as exc:
+        logger.warning("Could not notify the trainer: %s", exc)
+
+
 # --- shared commands ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _is_trainer(update, context):
+        # The chat now definitely exists, so the trainer menu can be registered.
+        await _set_trainer_menu(context.bot, _cfg(context).trainer_id)
         text = (
             "שלום, המאמן! פקודות ניהול:\n"
             "/addslot <יום> <HH:MM> [דקות] — הוספת מועד שבועי "
@@ -166,7 +197,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def _handle_book(query, context, payload: str) -> None:
-    db, cfg = _db(context), _cfg(context)
+    db = _db(context)
     slot_id_str, _, day_str = payload.partition("|")
     slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
     user = query.from_user
@@ -187,9 +218,7 @@ async def _handle_book(query, context, payload: str) -> None:
 
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
     await query.edit_message_text(f"✅ האימון נקבע: {label}\nנתראה באימון!")
-    await context.bot.send_message(
-        cfg.trainer_id, f"📅 הזמנה חדשה: {label} — {_display_name(user)}"
-    )
+    await _notify_trainer(context, f"📅 הזמנה חדשה: {label} — {_display_name(user)}")
 
 
 async def _handle_cancel(query, context, payload: str) -> None:
@@ -206,9 +235,7 @@ async def _handle_cancel(query, context, payload: str) -> None:
     label = _fmt_booking(row)
     await query.edit_message_text(f"❌ האימון בוטל: {label}")
     if not is_trainer:
-        await context.bot.send_message(
-            cfg.trainer_id, f"❌ בוטל אימון: {label} — {row['user_name']}"
-        )
+        await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
 
 
 # --- trainer commands ---
