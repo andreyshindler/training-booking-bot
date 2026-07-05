@@ -9,6 +9,11 @@ trainer's predefined weekly schedule.
   and tap one to book it. Each slot can be booked by exactly one person per
   date; double bookings are rejected atomically at the database level.
 - The trainer gets a Telegram notification for every booking and cancellation.
+- The bot speaks **Hebrew**: all messages, dates, and button labels are in
+  Hebrew, and the ☰ commands menu is registered automatically with Hebrew
+  descriptions (command names themselves stay Latin — a Telegram requirement).
+  The trainer sees the full command menu; everyone else sees only the trainee
+  commands. `/addslot` accepts Hebrew day names too, e.g. `/addslot שני 10:00 60`.
 
 ## Commands
 

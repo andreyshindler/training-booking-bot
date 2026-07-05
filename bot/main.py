@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder
 
 from .config import load_config
 from .db import Database
-from .handlers import CFG, DB, register_handlers
+from .handlers import CFG, DB, register_handlers, setup_commands_menu
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s", level=logging.INFO
@@ -15,7 +15,12 @@ logging.basicConfig(
 
 def main() -> None:
     cfg = load_config()
-    app = ApplicationBuilder().token(cfg.bot_token).build()
+    app = (
+        ApplicationBuilder()
+        .token(cfg.bot_token)
+        .post_init(setup_commands_menu)
+        .build()
+    )
     app.bot_data[DB] = Database(cfg.db_path)
     app.bot_data[CFG] = cfg
     register_handlers(app)
