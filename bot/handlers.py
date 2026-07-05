@@ -1,5 +1,6 @@
 """Telegram command and callback handlers (all user-facing text in Hebrew)."""
 
+import io
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -965,10 +966,13 @@ _ACTION_LABELS = {
 }
 
 
+AUDIT_LOG_FILE_LIMIT = 1000
+
+
 async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
-    rows = _db(context).list_audit_log(limit=30)
+    rows = _db(context).list_audit_log(limit=AUDIT_LOG_FILE_LIMIT)
     if not rows:
         await update.message.reply_text("יומן הפעולות ריק.")
         return
@@ -979,7 +983,13 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if row["details"]:
             line += f" — {row['details']}"
         lines.append(line)
-    await update.message.reply_text("יומן פעולות (30 אחרונות):\n" + "\n".join(lines))
+    content = "יומן פעולות\n" + "=" * 30 + "\n" + "\n".join(lines) + "\n"
+    filename = f"audit-log-{_now(context).strftime('%Y%m%d-%H%M')}.txt"
+    await update.message.reply_document(
+        document=io.BytesIO(content.encode("utf-8")),
+        filename=filename,
+        caption=f"יומן פעולות — {len(rows)} הרשומות האחרונות",
+    )
 
 
 def register_handlers(app: Application) -> None:

@@ -47,7 +47,7 @@ Trainer only:
 | `/admins` | List the primary trainer and all additional admins |
 | `/addadmin <id>` | Grant another Telegram user full admin access (same as tapping ➕ הוספת מנהל) |
 | `/deladmin <id>` | Revoke an admin added this way (the primary `TRAINER_ID` can't be removed) |
-| `/auditlog` | Last 30 state-changing actions — bookings, cancellations, schedule edits, admin changes — with who did what and when |
+| `/auditlog` | Sends the audit log as a `.txt` file (up to the last 1000 actions) — bookings, cancellations, schedule edits, admin changes — with who did what and when |
 
 Any additional admin has the exact same permissions as the primary trainer,
 including adding/removing other admins. Admins are stored in the database
