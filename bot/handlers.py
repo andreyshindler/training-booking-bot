@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 from telegram import (
@@ -118,9 +118,24 @@ async def _notify_trainer(context, text: str) -> None:
         logger.warning("Could not notify the trainer: %s", exc)
 
 
+# How far the mini-app's one-time-lesson calendar reaches: a small buffer
+# into the past (so "this week" still shows anything just added) and a full
+# year ahead, matching the year-long week-by-week view the trainer pages through.
+ONE_TIME_WINDOW_PAST_DAYS = 7
+ONE_TIME_WINDOW_FUTURE_DAYS = 365
+
+
+def _one_time_window(cfg: Config) -> tuple[date, date]:
+    today = datetime.now(cfg.timezone).date()
+    return (
+        today - timedelta(days=ONE_TIME_WINDOW_PAST_DAYS),
+        today + timedelta(days=ONE_TIME_WINDOW_FUTURE_DAYS),
+    )
+
+
 def _webapp_edit_url(cfg: Config, db: Database) -> str:
     """Mini-app URL carrying the current schedule, so the app opens pre-filled."""
-    slots = [
+    recurring = [
         {
             "weekday": row["weekday"],
             "start_time": row["start_time"],
@@ -129,8 +144,19 @@ def _webapp_edit_url(cfg: Config, db: Database) -> str:
         }
         for row in db.list_slots()
     ]
+    from_day, to_day = _one_time_window(cfg)
+    one_time = [
+        {
+            "date": row["date"],
+            "start_time": row["start_time"],
+            "duration_min": row["duration_min"],
+            "capacity": row["capacity"],
+        }
+        for row in db.list_one_time_slots(from_day, to_day)
+    ]
+    payload = {"recurring": recurring, "one_time": one_time}
     separator = "&" if "?" in cfg.webapp_url else "?"
-    return f"{cfg.webapp_url}{separator}slots={quote(json.dumps(slots))}"
+    return f"{cfg.webapp_url}{separator}data={quote(json.dumps(payload))}"
 
 
 def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> ReplyKeyboardMarkup:
@@ -180,8 +206,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db, cfg = _db(context), _cfg(context)
     now = _now(context)
+    one_time = db.list_one_time_slots(now.date(), now.date() + timedelta(days=cfg.booking_days_ahead))
     open_slots = available_slots(
-        db.list_slots(), db.booking_counts_from(now.date()), now, cfg.booking_days_ahead
+        db.list_slots(), one_time, db.booking_counts_from(now.date()), now, cfg.booking_days_ahead
     )
     if not open_slots:
         await update.message.reply_text(
@@ -248,25 +275,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- mini-app result (trainer saved the schedule in the web app) ---
 
+def _parse_slot_fields(slot: dict) -> tuple[str, int, int]:
+    start_time = parse_time(str(slot["start_time"]))
+    duration = int(slot.get("duration_min", 60))
+    if not 0 < duration <= 480:
+        raise ValueError(f"duration out of range: {duration}")
+    capacity = int(slot.get("capacity", 1))
+    if not 0 < capacity <= 100:
+        raise ValueError(f"capacity out of range: {capacity}")
+    return start_time, duration, capacity
+
+
 async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
-    db = _db(context)
+    db, cfg = _db(context), _cfg(context)
     try:
         data = json.loads(update.effective_message.web_app_data.data)
-        desired = []
-        for slot in data["slots"]:
+        desired_recurring = []
+        for slot in data["recurring"]:
             weekday = int(slot["weekday"])
             if not 0 <= weekday <= 6:
                 raise ValueError(f"weekday out of range: {weekday}")
-            start_time = parse_time(str(slot["start_time"]))
-            duration = int(slot.get("duration_min", 60))
-            if not 0 < duration <= 480:
-                raise ValueError(f"duration out of range: {duration}")
-            capacity = int(slot.get("capacity", 1))
-            if not 0 < capacity <= 100:
-                raise ValueError(f"capacity out of range: {capacity}")
-            desired.append((weekday, start_time, duration, capacity))
+            start_time, duration, capacity = _parse_slot_fields(slot)
+            desired_recurring.append((weekday, start_time, duration, capacity))
+
+        desired_one_time = []
+        for slot in data["one_time"]:
+            day_iso = date.fromisoformat(str(slot["date"])).isoformat()
+            start_time, duration, capacity = _parse_slot_fields(slot)
+            desired_one_time.append((day_iso, start_time, duration, capacity))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Bad web app data: %s", exc)
         await update.effective_message.reply_text(
@@ -274,9 +312,19 @@ async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    added, removed, updated = db.sync_slots(desired)
-    summary = f"✅ המערכת עודכנה: נוספו {added}, נמחקו {removed}, שונו {updated}."
-    if removed:
+    added, removed, updated = db.sync_slots(desired_recurring)
+    from_day, to_day = _one_time_window(cfg)
+    ot_added, ot_removed, ot_updated = db.sync_one_time_slots(desired_one_time, from_day, to_day)
+    total_added, total_removed, total_updated = (
+        added + ot_added,
+        removed + ot_removed,
+        updated + ot_updated,
+    )
+    summary = (
+        f"✅ המערכת עודכנה: נוספו {total_added}, נמחקו {total_removed}, "
+        f"שונו {total_updated}."
+    )
+    if total_removed:
         summary += "\n(הזמנות עתידיות למועדים שנמחקו בוטלו.)"
     # Refresh the keyboard so the edit button carries the new schedule.
     await update.effective_message.reply_text(
@@ -406,20 +454,36 @@ async def del_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
-    rows = _db(context).list_slots()
-    if not rows:
+    db, cfg = _db(context), _cfg(context)
+    rows = db.list_slots()
+    sections = []
+    if rows:
+        lines = [
+            f"#{row['id']} יום {WEEKDAY_NAMES_HE[row['weekday']]} {row['start_time']} "
+            f"({row['duration_min']} דק'"
+            + (f", {row['capacity']} משתתפים)" if row["capacity"] > 1 else ")")
+            for row in rows
+        ]
+        sections.append("המערכת השבועית (חוזרת):\n" + "\n".join(lines))
+
+    from_day, to_day = _one_time_window(cfg)
+    one_time_rows = db.list_one_time_slots(from_day, to_day)
+    if one_time_rows:
+        lines = [
+            f"#{row['id']} {date.fromisoformat(row['date']).strftime('%d/%m/%Y')} "
+            f"{row['start_time']} ({row['duration_min']} דק'"
+            + (f", {row['capacity']} משתתפים)" if row["capacity"] > 1 else ")")
+            for row in one_time_rows
+        ]
+        sections.append("שיעורים חד-פעמיים:\n" + "\n".join(lines))
+
+    if not sections:
         await update.message.reply_text(
-            f"אין עדיין מועדים שבועיים. הוסיפו דרך {BTN_EDIT} "
+            f"אין עדיין מועדים. הוסיפו דרך {BTN_EDIT} "
             "או עם: /addslot שני 10:00 60"
         )
         return
-    lines = [
-        f"#{row['id']} יום {WEEKDAY_NAMES_HE[row['weekday']]} {row['start_time']} "
-        f"({row['duration_min']} דק'"
-        + (f", {row['capacity']} משתתפים)" if row["capacity"] > 1 else ")")
-        for row in rows
-    ]
-    await update.message.reply_text("המערכת השבועית:\n" + "\n".join(lines))
+    await update.message.reply_text("\n\n".join(sections))
 
 
 async def bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

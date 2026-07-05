@@ -76,27 +76,34 @@ class OpenSlot:
 
 
 def available_slots(
-    slots,
+    recurring_slots,
+    one_time_slots,
     booking_counts: dict[tuple[int, str], int],
     now: datetime,
     days_ahead: int,
 ) -> list[OpenSlot]:
-    """Expand the weekly schedule into concrete open slots for the next N days.
+    """Expand the schedule into concrete open slots for the next N days.
 
-    ``slots`` is an iterable of mappings with keys id/weekday/start_time/
-    duration_min/capacity (sqlite3.Row works). ``booking_counts`` maps
-    (slot_id, iso_date) to how many users are already enrolled. Slots already
-    started or already at capacity are excluded.
+    ``recurring_slots`` is an iterable of mappings with keys id/weekday/
+    start_time/duration_min/capacity (sqlite3.Row works); each recurs every
+    week. ``one_time_slots`` is the same shape but with a "date" key
+    ("YYYY-MM-DD") instead of "weekday", occurring only on that date.
+    ``booking_counts`` maps (slot_id, iso_date) to how many users are already
+    enrolled. Slots already started or already at capacity are excluded.
     """
     by_weekday: dict[int, list] = {}
-    for slot in slots:
+    for slot in recurring_slots:
         by_weekday.setdefault(slot["weekday"], []).append(slot)
+    by_date: dict[str, list] = {}
+    for slot in one_time_slots:
+        by_date.setdefault(slot["date"], []).append(slot)
 
     result: list[OpenSlot] = []
     today = now.date()
     for offset in range(days_ahead + 1):
         day = today + timedelta(days=offset)
-        for slot in by_weekday.get(day.weekday(), []):
+        candidates = by_weekday.get(day.weekday(), []) + by_date.get(day.isoformat(), [])
+        for slot in candidates:
             capacity = slot["capacity"]
             booked_count = booking_counts.get((slot["id"], day.isoformat()), 0)
             if booked_count >= capacity:

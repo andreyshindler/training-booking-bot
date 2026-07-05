@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS slots (
     start_time TEXT NOT NULL,
     duration_min INTEGER NOT NULL DEFAULT 60,
     capacity INTEGER NOT NULL DEFAULT 1,
-    UNIQUE (weekday, start_time)
+    date TEXT
 );
 CREATE TABLE IF NOT EXISTS bookings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,12 +44,52 @@ class Database:
         self.conn.close()
 
     def _migrate(self) -> None:
-        """Upgrade databases created before the capacity/group-booking feature."""
+        """Upgrade databases created before the capacity/one-time-lesson features."""
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(slots)")}
         if "capacity" not in cols:
             self.conn.execute(
                 "ALTER TABLE slots ADD COLUMN capacity INTEGER NOT NULL DEFAULT 1"
             )
+            cols.add("capacity")
+
+        if "date" not in cols:
+            # SQLite can't drop the old table-level UNIQUE(weekday, start_time)
+            # via ALTER TABLE, and one-time lessons need a nullable date column
+            # with its own partial-unique rule, so recreate the table. Renaming
+            # "slots" itself (rather than the replacement) would make SQLite
+            # silently rewrite bookings' FK to point at the old name, so instead
+            # build the replacement under a temp name, drop "slots", then rename
+            # the temp table into place.
+            self.conn.executescript(
+                """
+                PRAGMA foreign_keys = OFF;
+                CREATE TABLE slots_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+                    start_time TEXT NOT NULL,
+                    duration_min INTEGER NOT NULL DEFAULT 60,
+                    capacity INTEGER NOT NULL DEFAULT 1,
+                    date TEXT
+                );
+                INSERT INTO slots_new (id, weekday, start_time, duration_min, capacity, date)
+                    SELECT id, weekday, start_time, duration_min, capacity, NULL FROM slots;
+                DROP TABLE slots;
+                ALTER TABLE slots_new RENAME TO slots;
+                PRAGMA foreign_keys = ON;
+                """
+            )
+
+        # The "date" column is now guaranteed to exist (either just added above,
+        # or present since this connection's first SCHEMA run); these partial
+        # unique indexes replace the old table-level UNIQUE(weekday, start_time).
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_slots_recurring_unique "
+            "ON slots (weekday, start_time) WHERE date IS NULL"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_slots_one_time_unique "
+            "ON slots (date, start_time) WHERE date IS NOT NULL"
+        )
 
         unique_cols: set[str] = set()
         for idx in self.conn.execute("PRAGMA index_list(bookings)").fetchall():
@@ -79,15 +119,15 @@ class Database:
                 """
             )
 
-    # --- schedule slots (managed by the trainer) ---
+    # --- recurring weekly slots (managed by the trainer) ---
 
     def add_slot(
         self, weekday: int, start_time: str, duration_min: int = 60, capacity: int = 1
     ) -> int:
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO slots (weekday, start_time, duration_min, capacity) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO slots (weekday, start_time, duration_min, capacity, date) "
+                "VALUES (?, ?, ?, ?, NULL)",
                 (weekday, start_time, duration_min, capacity),
             )
         return cur.lastrowid
@@ -99,7 +139,7 @@ class Database:
 
     def list_slots(self) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM slots ORDER BY weekday, start_time"
+            "SELECT * FROM slots WHERE date IS NULL ORDER BY weekday, start_time"
         ).fetchall()
 
     def get_slot(self, slot_id: int) -> sqlite3.Row | None:
@@ -108,7 +148,7 @@ class Database:
         ).fetchone()
 
     def sync_slots(self, desired) -> tuple[int, int, int]:
-        """Make the stored schedule match ``desired``.
+        """Make the recurring weekly schedule match ``desired``.
 
         Each item is (weekday, "HH:MM", duration_min[, capacity]); capacity
         defaults to 1. Slots are matched by (weekday, start_time): missing
@@ -138,6 +178,62 @@ class Database:
         for key, (duration_min, capacity) in want.items():
             if key not in existing:
                 self.add_slot(key[0], key[1], duration_min, capacity)
+                added += 1
+        return added, removed, updated
+
+    # --- one-time (non-recurring) slots ---
+
+    def add_one_time_slot(
+        self, day: date, start_time: str, duration_min: int = 60, capacity: int = 1
+    ) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO slots (weekday, start_time, duration_min, capacity, date) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (day.weekday(), start_time, duration_min, capacity, day.isoformat()),
+            )
+        return cur.lastrowid
+
+    def list_one_time_slots(self, from_day: date, to_day: date) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM slots WHERE date IS NOT NULL AND date BETWEEN ? AND ? "
+            "ORDER BY date, start_time",
+            (from_day.isoformat(), to_day.isoformat()),
+        ).fetchall()
+
+    def sync_one_time_slots(self, desired, from_day: date, to_day: date) -> tuple[int, int, int]:
+        """Make one-time slots within [from_day, to_day] match ``desired``.
+
+        Each item is ("YYYY-MM-DD", "HH:MM", duration_min[, capacity]); capacity
+        defaults to 1. Only slots whose date falls in the given window are
+        considered, so one-time lessons outside the range the caller sent
+        (e.g. the mini app's visible window) are left untouched.
+        """
+        existing = {
+            (r["date"], r["start_time"]): r for r in self.list_one_time_slots(from_day, to_day)
+        }
+        want: dict[tuple[str, str], tuple[int, int]] = {}
+        for day_iso, start_time, duration_min, *rest in desired:
+            capacity = rest[0] if rest else 1
+            want[(day_iso, start_time)] = (duration_min, capacity)
+
+        added = removed = updated = 0
+        for key, row in existing.items():
+            if key not in want:
+                self.remove_slot(row["id"])
+                removed += 1
+            elif (row["duration_min"], row["capacity"]) != want[key]:
+                duration_min, capacity = want[key]
+                with self.conn:
+                    self.conn.execute(
+                        "UPDATE slots SET duration_min = ?, capacity = ? WHERE id = ?",
+                        (duration_min, capacity, row["id"]),
+                    )
+                updated += 1
+        for key, (duration_min, capacity) in want.items():
+            if key not in existing:
+                day_iso, start_time = key
+                self.add_one_time_slot(date.fromisoformat(day_iso), start_time, duration_min, capacity)
                 added += 1
         return added, removed, updated
 

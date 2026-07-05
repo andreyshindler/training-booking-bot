@@ -26,6 +26,18 @@
   h1 { font-size: 1.15rem; margin: 0 0 4px; }
   .hint { color: var(--hint); font-size: 0.85rem; margin: 0 0 16px; }
 
+  .weeknav {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .weeknav button {
+    border: none; background: var(--card); color: var(--fg);
+    width: 36px; height: 36px; flex: none; border-radius: 10px;
+    font-size: 1.1rem; cursor: pointer;
+  }
+  .weeknav button:disabled { opacity: 0.35; cursor: default; }
+  .week-label { font-weight: 600; font-size: 0.95rem; }
+
   #days {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
     margin-bottom: 20px;
@@ -34,13 +46,13 @@
     aspect-ratio: 1 / 1; background: var(--card); border-radius: 14px;
     padding: 8px; display: flex; flex-direction: column; overflow-y: auto;
   }
-  .day-name { font-weight: 600; font-size: 0.8rem; margin-bottom: 4px; text-align: center; }
+  .day-name { font-weight: 600; font-size: 0.78rem; margin-bottom: 4px; text-align: center; }
   .day-empty { color: var(--hint); font-size: 0.7rem; text-align: center; margin: auto 0; }
   .chips { display: flex; flex-direction: column; gap: 4px; }
   .chip {
     display: flex; align-items: center; justify-content: space-between; gap: 4px;
     background: var(--bg); border-radius: 8px;
-    padding: 4px 6px; font-size: 0.72rem;
+    padding: 4px 6px; font-size: 0.7rem;
   }
   .chip button {
     border: none; background: none; color: var(--danger);
@@ -52,8 +64,10 @@
     padding: 14px; margin-top: 20px;
   }
   .add-card .title { font-weight: 600; margin-bottom: 10px; font-size: 0.95rem; }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .field { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+  .field { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 0.75rem; color: var(--hint); }
   select, input {
     width: 100%;
@@ -61,6 +75,13 @@
     padding: 10px; font-size: 1rem;
     background: var(--bg); color: var(--fg);
   }
+  .seg { display: flex; gap: 8px; margin-top: 10px; }
+  .seg-btn {
+    flex: 1; border: 1px solid rgba(128,128,128,0.35); border-radius: 10px;
+    background: var(--bg); color: var(--fg);
+    padding: 10px; font-size: 0.85rem; cursor: pointer;
+  }
+  .seg-btn.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
   .add-btn {
     margin-top: 10px; width: 100%;
     border: none; border-radius: 10px;
@@ -79,12 +100,21 @@
 </head>
 <body>
   <h1>עריכת המערכת השבועית</h1>
-  <p class="hint">המועדים חוזרים על עצמם כל שבוע. מחיקת מועד מבטלת את ההזמנות העתידיות שלו.</p>
+  <p class="hint">
+    שיעורים חוזרים (🔁) חוזרים כל שבוע. שיעורים חד-פעמיים (1×) מופיעים רק בתאריך שנבחר.
+    מחיקת שיעור מבטלת את ההזמנות העתידיות שלו.
+  </p>
+
+  <div class="weeknav">
+    <button id="prevWeek" onclick="changeWeek(-1)" aria-label="שבוע קודם">‹</button>
+    <div class="week-label" id="weekLabel"></div>
+    <button id="nextWeek" onclick="changeWeek(1)" aria-label="שבוע הבא">›</button>
+  </div>
 
   <div id="days"></div>
 
   <div class="add-card">
-    <div class="title">הוספת מועד</div>
+    <div class="title">הוספת שיעור</div>
     <div class="row">
       <div class="field">
         <label for="daySel">יום</label>
@@ -99,9 +129,13 @@
         <input id="durInp" type="number" value="60" min="15" max="480" step="15">
       </div>
       <div class="field">
-        <label for="capInp">מספר משתתפים</label>
-        <input id="capInp" type="number" value="1" min="1" max="100" step="1">
+        <label for="capSel">מספר משתתפים</label>
+        <select id="capSel"></select>
       </div>
+    </div>
+    <div class="seg">
+      <button type="button" id="typeRecurring" class="seg-btn active" onclick="setType(true)">🔁 חוזר כל שבוע</button>
+      <button type="button" id="typeOneTime" class="seg-btn" onclick="setType(false)">1× חד-פעמי</button>
     </div>
     <button class="add-btn" onclick="addSlot()">+ הוספה</button>
     <div class="error" id="err"></div>
@@ -110,53 +144,140 @@
   <button id="saveBtn" onclick="save()">💾 שמירת המערכת</button>
 
 <script>
-  // Israeli week order; values are Python weekday numbers (Mon=0 .. Sun=6)
-  const DAY_ORDER = [6, 0, 1, 2, 3, 4, 5];
-  const DAY_NAMES = {6:"ראשון", 0:"שני", 1:"שלישי", 2:"רביעי", 3:"חמישי", 4:"שישי", 5:"שבת"};
+  // Sunday-first order, matching Israeli weeks. Index i corresponds to
+  // weekDates()[i]; PY_WEEKDAY[i] is that date's Python weekday() (Mon=0..Sun=6).
+  const DAY_NAMES = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"];
+  const PY_WEEKDAY = [6, 0, 1, 2, 3, 4, 5];
+  const MAX_WEEKS_AHEAD = 52;
 
   const tg = window.Telegram && window.Telegram.WebApp;
-  let slots = [];
+  let recurringSlots = [];
+  let oneTimeSlots = [];
   try {
-    const raw = new URLSearchParams(location.search).get("slots");
-    if (raw) slots = JSON.parse(raw).map(s => ({
-      weekday: Number(s.weekday),
-      start_time: String(s.start_time),
-      duration_min: Number(s.duration_min) || 60,
-      capacity: Number(s.capacity) || 1,
-    }));
+    const raw = new URLSearchParams(location.search).get("data");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      recurringSlots = (parsed.recurring || []).map(s => ({
+        weekday: Number(s.weekday),
+        start_time: String(s.start_time),
+        duration_min: Number(s.duration_min) || 60,
+        capacity: Number(s.capacity) || 1,
+      }));
+      oneTimeSlots = (parsed.one_time || []).map(s => ({
+        date: String(s.date),
+        start_time: String(s.start_time),
+        duration_min: Number(s.duration_min) || 60,
+        capacity: Number(s.capacity) || 1,
+      }));
+    }
   } catch (e) { /* start empty on bad input */ }
 
+  let weekOffset = 0;
+  let isRecurringType = true;
+
+  function startOfWeek(d) {
+    const s = new Date(d);
+    s.setHours(0, 0, 0, 0);
+    s.setDate(s.getDate() - s.getDay());
+    return s;
+  }
+  const baseWeekStart = startOfWeek(new Date());
+
+  function weekDates() {
+    const start = new Date(baseWeekStart);
+    start.setDate(start.getDate() + weekOffset * 7);
+    const dates = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      dates.push(d);
+    }
+    return dates;
+  }
+
+  function fmtDDMM(d) {
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    return dd + "/" + mm;
+  }
+
+  function isoDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function changeWeek(delta) {
+    const next = weekOffset + delta;
+    if (next < 0 || next > MAX_WEEKS_AHEAD) return;
+    weekOffset = next;
+    render();
+  }
+
+  function setType(recurring) {
+    isRecurringType = recurring;
+    document.getElementById("typeRecurring").classList.toggle("active", recurring);
+    document.getElementById("typeOneTime").classList.toggle("active", !recurring);
+  }
+
+  function slotsForTile(pyWeekday, iso) {
+    const rec = recurringSlots
+      .filter(s => s.weekday === pyWeekday)
+      .map(s => ({ slot: s, kind: "recurring" }));
+    const one = oneTimeSlots
+      .filter(s => s.date === iso)
+      .map(s => ({ slot: s, kind: "one_time" }));
+    return [...rec, ...one].sort((a, b) => a.slot.start_time.localeCompare(b.slot.start_time));
+  }
+
   function render() {
+    const dates = weekDates();
+
+    document.getElementById("weekLabel").textContent =
+      fmtDDMM(dates[0]) + " – " + fmtDDMM(dates[6]);
+    document.getElementById("prevWeek").disabled = weekOffset === 0;
+    document.getElementById("nextWeek").disabled = weekOffset === MAX_WEEKS_AHEAD;
+
     const container = document.getElementById("days");
     container.innerHTML = "";
-    for (const day of DAY_ORDER) {
-      const daySlots = slots
-        .filter(s => s.weekday === day)
-        .sort((a, b) => a.start_time.localeCompare(b.start_time));
+    dates.forEach((d, i) => {
+      const pyWeekday = PY_WEEKDAY[i];
+      const iso = isoDate(d);
+      const entries = slotsForTile(pyWeekday, iso);
+
       const div = document.createElement("div");
       div.className = "day";
       const name = document.createElement("div");
       name.className = "day-name";
-      name.textContent = "יום " + DAY_NAMES[day];
+      name.textContent = DAY_NAMES[i] + " " + fmtDDMM(d);
       div.appendChild(name);
-      if (!daySlots.length) {
+
+      if (!entries.length) {
         const empty = document.createElement("div");
         empty.className = "day-empty";
-        empty.textContent = "אין מועדים";
+        empty.textContent = "אין שיעורים";
         div.appendChild(empty);
       } else {
         const chips = document.createElement("div");
         chips.className = "chips";
-        for (const s of daySlots) {
+        for (const entry of entries) {
+          const s = entry.slot;
           const chip = document.createElement("span");
           chip.className = "chip";
           chip.textContent = s.start_time + " · " + s.duration_min + " דק'" +
-            (s.capacity > 1 ? " · עד " + s.capacity + " משתתפים" : "");
+            (s.capacity > 1 ? " · עד " + s.capacity + " משתתפים" : "") +
+            (entry.kind === "recurring" ? " 🔁" : " 1×");
           const del = document.createElement("button");
           del.textContent = "✕";
           del.setAttribute("aria-label", "מחיקה");
           del.onclick = () => {
-            slots = slots.filter(x => x !== s);
+            if (entry.kind === "recurring") {
+              if (!confirm("השיעור הזה חוזר כל שבוע. למחוק אותו מכל השבועות?")) return;
+              recurringSlots = recurringSlots.filter(x => x !== s);
+            } else {
+              oneTimeSlots = oneTimeSlots.filter(x => x !== s);
+            }
             render();
           };
           chip.appendChild(del);
@@ -165,29 +286,53 @@
         div.appendChild(chips);
       }
       container.appendChild(div);
-    }
+    });
+
+    // the day selector always reflects the currently visible week's dates
+    const sel = document.getElementById("daySel");
+    const prevValue = sel.value;
+    sel.innerHTML = "";
+    dates.forEach((d, i) => {
+      const opt = document.createElement("option");
+      opt.value = i;
+      opt.textContent = "יום " + DAY_NAMES[i] + " " + fmtDDMM(d);
+      sel.appendChild(opt);
+    });
+    if (prevValue !== "" && Number(prevValue) < dates.length) sel.value = prevValue;
   }
 
   function addSlot() {
     const err = document.getElementById("err");
     err.textContent = "";
-    const weekday = Number(document.getElementById("daySel").value);
+    const dayIdx = Number(document.getElementById("daySel").value);
     const time = document.getElementById("timeInp").value;
     const dur = Number(document.getElementById("durInp").value);
-    const cap = Number(document.getElementById("capInp").value);
+    const cap = Number(document.getElementById("capSel").value);
     if (!time) { err.textContent = "יש לבחור שעה."; return; }
     if (!(dur > 0 && dur <= 480)) { err.textContent = "משך האימון: 1 עד 480 דקות."; return; }
-    if (!(cap > 0 && cap <= 100)) { err.textContent = "מספר משתתפים: 1 עד 100."; return; }
-    if (slots.some(s => s.weekday === weekday && s.start_time === time)) {
-      err.textContent = "כבר קיים מועד ביום ובשעה האלה.";
-      return;
+
+    const day = weekDates()[dayIdx];
+    const pyWeekday = PY_WEEKDAY[dayIdx];
+    const iso = isoDate(day);
+
+    if (isRecurringType) {
+      if (recurringSlots.some(s => s.weekday === pyWeekday && s.start_time === time)) {
+        err.textContent = "כבר קיים שיעור חוזר ביום ובשעה האלה.";
+        return;
+      }
+      recurringSlots.push({ weekday: pyWeekday, start_time: time, duration_min: dur, capacity: cap });
+    } else {
+      if (oneTimeSlots.some(s => s.date === iso && s.start_time === time)) {
+        err.textContent = "כבר קיים שיעור בתאריך ובשעה האלה.";
+        return;
+      }
+      oneTimeSlots.push({ date: iso, start_time: time, duration_min: dur, capacity: cap });
     }
-    slots.push({ weekday: weekday, start_time: time, duration_min: dur, capacity: cap });
     render();
   }
 
   function save() {
-    const payload = JSON.stringify({ slots: slots });
+    const payload = JSON.stringify({ recurring: recurringSlots, one_time: oneTimeSlots });
     if (tg) {
       tg.sendData(payload); // Telegram closes the mini app automatically
     } else {
@@ -195,13 +340,13 @@
     }
   }
 
-  // populate the day selector
-  const sel = document.getElementById("daySel");
-  for (const day of DAY_ORDER) {
+  // participants scroller — a native picker wheel on mobile, like the hour field
+  const capSel = document.getElementById("capSel");
+  for (let n = 1; n <= 50; n++) {
     const opt = document.createElement("option");
-    opt.value = day;
-    opt.textContent = "יום " + DAY_NAMES[day];
-    sel.appendChild(opt);
+    opt.value = n;
+    opt.textContent = n;
+    capSel.appendChild(opt);
   }
 
   render();

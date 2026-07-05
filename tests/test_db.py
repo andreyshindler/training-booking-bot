@@ -122,3 +122,66 @@ def test_removing_slot_cascades_bookings(db):
     db.book(slot_id, date(2026, 7, 6), 111, "Alice")
     db.remove_slot(slot_id)
     assert db.bookings_from(date(2026, 1, 1)) == []
+
+
+# --- one-time (non-recurring) slots ---
+
+
+def test_add_one_time_slot_is_excluded_from_recurring_list(db):
+    db.add_slot(0, "10:00")  # recurring
+    db.add_one_time_slot(date(2026, 7, 8), "16:00", 45)
+    assert [(r["weekday"], r["start_time"]) for r in db.list_slots()] == [(0, "10:00")]
+    one_time = db.list_one_time_slots(date(2026, 1, 1), date(2027, 1, 1))
+    assert [(r["date"], r["start_time"], r["duration_min"]) for r in one_time] == [
+        ("2026-07-08", "16:00", 45)
+    ]
+
+
+def test_one_time_slot_duplicate_rejected(db):
+    db.add_one_time_slot(date(2026, 7, 8), "16:00")
+    with pytest.raises(Exception):
+        db.add_one_time_slot(date(2026, 7, 8), "16:00")
+
+
+def test_recurring_and_one_time_can_share_weekday_and_time(db):
+    # Same weekday+time is fine as long as one is recurring and the other is dated.
+    db.add_slot(2, "16:00")  # every Wednesday
+    db.add_one_time_slot(date(2026, 7, 8), "16:00")  # a specific Wednesday
+    assert len(db.list_slots()) == 1
+    assert len(db.list_one_time_slots(date(2026, 1, 1), date(2027, 1, 1))) == 1
+
+
+def test_list_one_time_slots_respects_window(db):
+    db.add_one_time_slot(date(2026, 7, 8), "16:00")
+    db.add_one_time_slot(date(2026, 12, 1), "16:00")
+    rows = db.list_one_time_slots(date(2026, 7, 1), date(2026, 7, 31))
+    assert [r["date"] for r in rows] == ["2026-07-08"]
+
+
+def test_sync_one_time_slots_adds_removes_updates(db):
+    db.add_one_time_slot(date(2026, 7, 8), "16:00", 45)   # will get a new duration
+    db.add_one_time_slot(date(2026, 7, 9), "09:00", 60)   # will be removed
+    added, removed, updated = db.sync_one_time_slots(
+        [("2026-07-08", "16:00", 90), ("2026-07-10", "11:00", 30)],
+        date(2026, 7, 1),
+        date(2026, 7, 31),
+    )
+    assert (added, removed, updated) == (1, 1, 1)
+    rows = {(r["date"], r["start_time"]): r["duration_min"] for r in db.list_one_time_slots(
+        date(2026, 7, 1), date(2026, 7, 31)
+    )}
+    assert rows == {("2026-07-08", "16:00"): 90, ("2026-07-10", "11:00"): 30}
+
+
+def test_sync_one_time_slots_ignores_entries_outside_window(db):
+    db.add_one_time_slot(date(2026, 12, 25), "10:00")  # outside the synced window
+    added, removed, updated = db.sync_one_time_slots([], date(2026, 7, 1), date(2026, 7, 31))
+    assert (added, removed, updated) == (0, 0, 0)
+    assert len(db.list_one_time_slots(date(2026, 1, 1), date(2027, 1, 1))) == 1
+
+
+def test_one_time_slot_removal_cancels_bookings(db):
+    slot_id = db.add_one_time_slot(date(2026, 7, 8), "16:00")
+    db.book(slot_id, date(2026, 7, 8), 111, "Alice")
+    db.remove_slot(slot_id)
+    assert db.bookings_from(date(2026, 1, 1)) == []
