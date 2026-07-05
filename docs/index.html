@@ -1,0 +1,195 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>עריכת המערכת השבועית</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --fg: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #7a7a7a);
+    --card: var(--tg-theme-secondary-bg-color, #f2f3f5);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-fg: var(--tg-theme-button-text-color, #ffffff);
+    --danger: #e53935;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px 16px 96px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  .hint { color: var(--hint); font-size: 0.85rem; margin: 0 0 16px; }
+
+  .day { margin-bottom: 14px; }
+  .day-name { font-weight: 600; font-size: 0.95rem; margin-bottom: 6px; }
+  .day-empty { color: var(--hint); font-size: 0.85rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--card); border-radius: 18px;
+    padding: 7px 12px; font-size: 0.9rem;
+  }
+  .chip button {
+    border: none; background: none; color: var(--danger);
+    font-size: 1rem; line-height: 1; padding: 0 2px; cursor: pointer;
+  }
+
+  .add-card {
+    background: var(--card); border-radius: 14px;
+    padding: 14px; margin-top: 20px;
+  }
+  .add-card .title { font-weight: 600; margin-bottom: 10px; font-size: 0.95rem; }
+  .row { display: flex; gap: 8px; }
+  select, input {
+    flex: 1; min-width: 0;
+    border: 1px solid rgba(128,128,128,0.35); border-radius: 10px;
+    padding: 10px; font-size: 1rem;
+    background: var(--bg); color: var(--fg);
+  }
+  .add-btn {
+    margin-top: 10px; width: 100%;
+    border: none; border-radius: 10px;
+    background: var(--accent); color: var(--accent-fg);
+    padding: 12px; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  #saveBtn {
+    position: fixed; bottom: 16px; right: 16px; left: 16px;
+    border: none; border-radius: 12px;
+    background: var(--accent); color: var(--accent-fg);
+    padding: 14px; font-size: 1.05rem; font-weight: 700; cursor: pointer;
+    display: none;
+  }
+  .error { color: var(--danger); font-size: 0.85rem; margin-top: 8px; min-height: 1.2em; }
+</style>
+</head>
+<body>
+  <h1>עריכת המערכת השבועית</h1>
+  <p class="hint">המועדים חוזרים על עצמם כל שבוע. מחיקת מועד מבטלת את ההזמנות העתידיות שלו.</p>
+
+  <div id="days"></div>
+
+  <div class="add-card">
+    <div class="title">הוספת מועד</div>
+    <div class="row">
+      <select id="daySel"></select>
+      <input id="timeInp" type="time" value="10:00" step="300">
+      <input id="durInp" type="number" value="60" min="15" max="480" step="15" title="דקות">
+    </div>
+    <button class="add-btn" onclick="addSlot()">+ הוספה</button>
+    <div class="error" id="err"></div>
+  </div>
+
+  <button id="saveBtn" onclick="save()">💾 שמירת המערכת</button>
+
+<script>
+  // Israeli week order; values are Python weekday numbers (Mon=0 .. Sun=6)
+  const DAY_ORDER = [6, 0, 1, 2, 3, 4, 5];
+  const DAY_NAMES = {6:"ראשון", 0:"שני", 1:"שלישי", 2:"רביעי", 3:"חמישי", 4:"שישי", 5:"שבת"};
+
+  const tg = window.Telegram && window.Telegram.WebApp;
+  let slots = [];
+  try {
+    const raw = new URLSearchParams(location.search).get("slots");
+    if (raw) slots = JSON.parse(raw).map(s => ({
+      weekday: Number(s.weekday),
+      start_time: String(s.start_time),
+      duration_min: Number(s.duration_min) || 60,
+    }));
+  } catch (e) { /* start empty on bad input */ }
+
+  function render() {
+    const container = document.getElementById("days");
+    container.innerHTML = "";
+    for (const day of DAY_ORDER) {
+      const daySlots = slots
+        .filter(s => s.weekday === day)
+        .sort((a, b) => a.start_time.localeCompare(b.start_time));
+      const div = document.createElement("div");
+      div.className = "day";
+      const name = document.createElement("div");
+      name.className = "day-name";
+      name.textContent = "יום " + DAY_NAMES[day];
+      div.appendChild(name);
+      if (!daySlots.length) {
+        const empty = document.createElement("div");
+        empty.className = "day-empty";
+        empty.textContent = "אין מועדים";
+        div.appendChild(empty);
+      } else {
+        const chips = document.createElement("div");
+        chips.className = "chips";
+        for (const s of daySlots) {
+          const chip = document.createElement("span");
+          chip.className = "chip";
+          chip.textContent = s.start_time + " · " + s.duration_min + " דק'";
+          const del = document.createElement("button");
+          del.textContent = "✕";
+          del.setAttribute("aria-label", "מחיקה");
+          del.onclick = () => {
+            slots = slots.filter(x => x !== s);
+            render();
+          };
+          chip.appendChild(del);
+          chips.appendChild(chip);
+        }
+        div.appendChild(chips);
+      }
+      container.appendChild(div);
+    }
+  }
+
+  function addSlot() {
+    const err = document.getElementById("err");
+    err.textContent = "";
+    const weekday = Number(document.getElementById("daySel").value);
+    const time = document.getElementById("timeInp").value;
+    const dur = Number(document.getElementById("durInp").value);
+    if (!time) { err.textContent = "יש לבחור שעה."; return; }
+    if (!(dur > 0 && dur <= 480)) { err.textContent = "משך האימון: 1 עד 480 דקות."; return; }
+    if (slots.some(s => s.weekday === weekday && s.start_time === time)) {
+      err.textContent = "כבר קיים מועד ביום ובשעה האלה.";
+      return;
+    }
+    slots.push({ weekday: weekday, start_time: time, duration_min: dur });
+    render();
+  }
+
+  function save() {
+    const payload = JSON.stringify({ slots: slots });
+    if (tg && tg.initData) {
+      tg.sendData(payload); // Telegram closes the mini app automatically
+    } else {
+      alert("הדף הזה מיועד לפתיחה מתוך טלגרם.");
+    }
+  }
+
+  // populate the day selector
+  const sel = document.getElementById("daySel");
+  for (const day of DAY_ORDER) {
+    const opt = document.createElement("option");
+    opt.value = day;
+    opt.textContent = "יום " + DAY_NAMES[day];
+    sel.appendChild(opt);
+  }
+
+  render();
+
+  if (tg && tg.initData) {
+    tg.ready();
+    tg.expand();
+    tg.MainButton.setText("💾 שמירת המערכת");
+    tg.MainButton.show();
+    tg.onEvent("mainButtonClicked", save);
+  } else {
+    // opened in a regular browser — show the fallback save button
+    document.getElementById("saveBtn").style.display = "block";
+  }
+</script>
+</body>
+</html>
