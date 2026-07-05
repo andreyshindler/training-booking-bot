@@ -1,5 +1,7 @@
 # Training Booking Bot
 
+![CI](https://github.com/andreyshindler/training-booking-bot/actions/workflows/ci.yml/badge.svg)
+
 A Telegram bot that lets a trainer's clients book training sessions from the
 trainer's predefined weekly schedule.
 
@@ -102,6 +104,27 @@ docker compose down             # stop it (bookings are kept)
 git pull && docker compose up -d --build   # upgrade to the latest code
 ```
 
+## Automatic deployment (pull-based, cron)
+
+For a Linux server/VPS. One-time setup after cloning and configuring `.env`:
+
+```bash
+bash scripts/install-auto-deploy-cron.sh
+```
+
+From then on it's fully automatic:
+
+- Merge to `main` → the server pulls and redeploys within ~1 minute. Pull-based,
+  so no inbound SSH or webhooks are needed.
+- You get a ✅/❌ Telegram message after each deploy (sent to `TRAINER_ID`
+  using the bot's own token from `.env`).
+- Watch deploys: `tail -f auto-deploy.log` in the repository directory
+  (override the location with the `AUTO_DEPLOY_LOG` environment variable).
+
+`scripts/auto-deploy.sh` is a no-op when `main` hasn't changed, uses a lock so
+runs never overlap, and hard-resets to `origin/main` (don't keep local edits
+on the server).
+
 ## Development
 
 ```bash
@@ -112,3 +135,12 @@ pytest
 The core logic (slot expansion in `bot/scheduling.py`, storage in `bot/db.py`)
 is independent of Telegram and fully unit-tested; `bot/handlers.py` wires it to
 python-telegram-bot v21.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the test suite on Python 3.11
+and 3.12, an import smoke test, and a Docker image build with a container
+smoke test. It triggers on every push to `main` and every pull request, plus a
+daily cron run at 06:00 UTC so dependency breakage is caught even without new
+commits. It can also be started manually from the Actions tab
+(`workflow_dispatch`).

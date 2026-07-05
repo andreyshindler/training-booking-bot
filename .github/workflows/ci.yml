@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Daily at 06:00 UTC (09:00 Israel time)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -v
+      - name: Import smoke test
+        run: python -c "import bot.handlers, bot.main; print('imports OK')"
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t training-booking-bot .
+      - name: Container smoke test
+        run: |
+          docker run --rm -e BOT_TOKEN=x -e TRAINER_ID=1 training-booking-bot \
+            python -c "
+          from bot.config import load_config
+          from bot.db import Database
+          cfg = load_config()
+          db = Database(cfg.db_path)
+          db.add_slot(0, '10:00', 60)
+          assert len(db.list_slots()) == 1
+          print('container OK: config loads, database writable at', cfg.db_path)
+          "
