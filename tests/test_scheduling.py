@@ -12,6 +12,13 @@ def test_parse_weekday_accepts_short_and_long_names():
     assert parse_weekday(" fri ") == 4
 
 
+def test_parse_weekday_accepts_hebrew_names():
+    assert parse_weekday("שני") == 0
+    assert parse_weekday("ראשון") == 6
+    assert parse_weekday("יום שלישי") == 1
+    assert parse_weekday("שבת") == 5
+
+
 def test_parse_weekday_rejects_garbage():
     with pytest.raises(ValueError):
         parse_weekday("someday")
@@ -62,6 +69,6 @@ def test_available_slots_excludes_booked():
     assert [(s.slot_id, s.day) for s in result] == [(1, date(2026, 7, 13))]
 
 
-def test_open_slot_label():
+def test_open_slot_label_is_hebrew():
     result = available_slots([_slot(1, 0, "10:00", 45)], set(), NOW, days_ahead=0)
-    assert result[0].label() == "Mon 06 Jul 10:00 (45 min)"
+    assert result[0].label() == "יום שני 06/07 10:00 (45 דק')"

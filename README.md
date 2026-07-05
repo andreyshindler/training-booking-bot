@@ -9,6 +9,11 @@ trainer's predefined weekly schedule.
   and tap one to book it. Each slot can be booked by exactly one person per
   date; double bookings are rejected atomically at the database level.
 - The trainer gets a Telegram notification for every booking and cancellation.
+- The bot speaks **Hebrew**: all messages, dates, and button labels are in
+  Hebrew, and the ☰ commands menu is registered automatically with Hebrew
+  descriptions (command names themselves stay Latin — a Telegram requirement).
+  The trainer sees the full command menu; everyone else sees only the trainee
+  commands. `/addslot` accepts Hebrew day names too, e.g. `/addslot שני 10:00 60`.
 
 ## Commands
 
@@ -50,6 +55,29 @@ Configuration (environment variables or `.env`):
 | `DB_PATH` | `bookings.db` | SQLite database file |
 | `TIMEZONE` | `UTC` | IANA timezone for the schedule, e.g. `America/Chicago` |
 | `BOOKING_DAYS_AHEAD` | `7` | How many days ahead trainees can book |
+
+## Running with Docker (recommended for always-on hosting)
+
+Requires Docker with the compose plugin. From the repository root:
+
+```bash
+cp .env.example .env   # then fill in BOT_TOKEN and TRAINER_ID
+docker compose up -d --build
+```
+
+That's it — the bot runs in the background and restarts automatically after
+crashes or server reboots (`restart: unless-stopped`). The SQLite database
+lives on a named volume (`bot-data`), so bookings survive rebuilds and
+upgrades.
+
+Useful commands:
+
+```bash
+docker compose logs -f          # watch the bot's logs
+docker compose restart          # restart the bot
+docker compose down             # stop it (bookings are kept)
+git pull && docker compose up -d --build   # upgrade to the latest code
+```
 
 ## Development
 
