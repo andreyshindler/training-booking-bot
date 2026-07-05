@@ -75,6 +75,18 @@
     border: 1px solid rgba(128,128,128,0.35); border-radius: 10px;
     padding: 10px; font-size: 1rem;
     background: var(--bg); color: var(--fg);
+    /* iOS gives time inputs (and selects) native styling with its own height
+       and corners; strip it so all four fields render identically. */
+    -webkit-appearance: none;
+    appearance: none;
+    height: 46px;
+  }
+  input[type="time"] { text-align: right; }
+  /* iOS wraps the time value in a special centered box; align it like the
+     other RTL fields and remove its extra margin so the height matches. */
+  input[type="time"]::-webkit-date-and-time-value {
+    text-align: right;
+    margin: 0;
   }
   .seg { display: flex; gap: 8px; margin-top: 10px; }
   .seg-btn {
