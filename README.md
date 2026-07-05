@@ -104,6 +104,27 @@ docker compose down             # stop it (bookings are kept)
 git pull && docker compose up -d --build   # upgrade to the latest code
 ```
 
+## Automatic deployment (pull-based, cron)
+
+For a Linux server/VPS. One-time setup after cloning and configuring `.env`:
+
+```bash
+bash scripts/install-auto-deploy-cron.sh
+```
+
+From then on it's fully automatic:
+
+- Merge to `main` → the server pulls and redeploys within ~1 minute. Pull-based,
+  so no inbound SSH or webhooks are needed.
+- You get a ✅/❌ Telegram message after each deploy (sent to `TRAINER_ID`
+  using the bot's own token from `.env`).
+- Watch deploys: `tail -f /var/log/auto-deploy.log` (falls back to
+  `auto-deploy.log` in the repo when `/var/log` isn't writable).
+
+`scripts/auto-deploy.sh` is a no-op when `main` hasn't changed, uses a lock so
+runs never overlap, and hard-resets to `origin/main` (don't keep local edits
+on the server).
+
 ## Development
 
 ```bash
