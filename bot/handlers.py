@@ -72,6 +72,7 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("addadmin", "הוספת מנהל"),
     BotCommand("deladmin", "הסרת מנהל"),
     BotCommand("auditlog", "יומן פעולות"),
+    BotCommand("userlog", "יומן פעילות למשתמש"),
     BotCommand("pending", "בקשות הרשמה ממתינות"),
     BotCommand("trainees", "רשימת מתאמנים (קישור לדפדפן)"),
 ]
@@ -579,6 +580,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_trainee_decision(query, context, payload, "approved")
     elif action == "reject_trainee":
         await _handle_trainee_decision(query, context, payload, "rejected")
+    elif action == "userlog":
+        await _handle_user_log(query, context, payload)
 
 
 async def _handle_trainee_decision(query, context, payload: str, status: str) -> None:
@@ -1167,6 +1170,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # --- audit log ---
 
 _ACTION_LABELS = {
+    "view_user_log": "צפייה ביומן פעילות של משתמש",
     "book": "הזמנת אימון",
     "cancel": "ביטול אימון",
     "waitlist_join": "הצטרפות לרשימת המתנה",
@@ -1204,14 +1208,7 @@ def _local_timestamp(created_at_utc: str, tz) -> str:
         return created_at_utc
 
 
-async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_trainer(update, context):
-        return
-    rows = _db(context).list_audit_log(limit=AUDIT_LOG_FILE_LIMIT)
-    if not rows:
-        await update.message.reply_text("יומן הפעולות ריק.")
-        return
-    tz = _cfg(context).timezone
+def _audit_lines(rows, tz) -> list[str]:
     lines = []
     for row in rows:
         action = _ACTION_LABELS.get(row["action"], row["action"])
@@ -1220,6 +1217,17 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if row["details"]:
             line += f" — {row['details']}"
         lines.append(line)
+    return lines
+
+
+async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    rows = _db(context).list_audit_log(limit=AUDIT_LOG_FILE_LIMIT)
+    if not rows:
+        await update.message.reply_text("יומן הפעולות ריק.")
+        return
+    lines = _audit_lines(rows, _cfg(context).timezone)
     content = "יומן פעולות\n" + "=" * 30 + "\n" + "\n".join(lines) + "\n"
     filename = f"audit-log-{_now(context).strftime('%Y%m%d-%H%M')}.txt"
     await update.message.reply_document(
@@ -1227,6 +1235,76 @@ async def audit_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         filename=filename,
         caption=f"יומן פעולות — {len(rows)} הרשומות האחרונות",
     )
+
+
+# --- per-user activity log (triggered by an admin) ---
+
+USER_LOG_BUTTON_LIMIT = 30
+
+
+async def _send_user_audit_file(message, context, target_id: int) -> None:
+    db, cfg = _db(context), _cfg(context)
+    rows = db.list_audit_log_for_user(target_id, limit=AUDIT_LOG_FILE_LIMIT)
+    if not rows:
+        await message.reply_text("אין פעילות רשומה למשתמש הזה.")
+        return
+    name = rows[0]["user_name"]  # rows are newest-first: the latest known name
+    lines = _audit_lines(rows, cfg.timezone)
+    header = f"יומן פעולות — {name} ({target_id})"
+    content = header + "\n" + "=" * 30 + "\n" + "\n".join(lines) + "\n"
+    filename = f"activity-{target_id}-{_now(context).strftime('%Y%m%d-%H%M')}.txt"
+    await message.reply_document(
+        document=io.BytesIO(content.encode("utf-8")),
+        filename=filename,
+        caption=f"{header} — {len(rows)} רשומות",
+    )
+
+
+async def user_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    _log(context, update.effective_user, "view_user_log")
+    if context.args and context.args[0].lstrip("#").isdigit():
+        await _send_user_audit_file(
+            update.message, context, int(context.args[0].lstrip("#"))
+        )
+        return
+    db, cfg = _db(context), _cfg(context)
+    users = db.list_audit_users()
+    if not users:
+        await update.message.reply_text("יומן הפעולות ריק.")
+        return
+    admin_ids = {cfg.trainer_id} | {row["user_id"] for row in db.list_admins()}
+    keyboard = []
+    for row in users[:USER_LOG_BUTTON_LIMIT]:
+        badge = "🛡 " if row["user_id"] in admin_ids else ""
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"{badge}{row['user_name']} — {row['actions']} פעולות",
+                    callback_data=f"userlog|{row['user_id']}",
+                )
+            ]
+        )
+    note = (
+        f"\n(מוצגים {USER_LOG_BUTTON_LIMIT} הפעילים האחרונים; "
+        "לאחרים: /userlog <מספר משתמש>)"
+        if len(users) > USER_LOG_BUTTON_LIMIT
+        else ""
+    )
+    await update.message.reply_text(
+        "בחרו משתמש לקבלת יומן הפעילות שלו כקובץ:" + note,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _handle_user_log(query, context, payload: str) -> None:
+    if not _is_trainer_id(context, query.from_user.id):
+        return
+    if not payload.isdigit():
+        return
+    _log(context, query.from_user, "view_user_log", f"ID: {payload}")
+    await _send_user_audit_file(query.message, context, int(payload))
 
 
 def register_handlers(app: Application) -> None:
@@ -1243,6 +1321,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("deladmin", del_admin_command))
     app.add_handler(CommandHandler("auditlog", audit_log_command))
+    app.add_handler(CommandHandler("userlog", user_log_command))
     app.add_handler(CommandHandler("pending", pending_command))
     app.add_handler(CommandHandler("trainees", trainees_command))
     app.add_handler(CallbackQueryHandler(on_callback))

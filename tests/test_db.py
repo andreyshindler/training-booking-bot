@@ -397,3 +397,14 @@ def test_list_trainees_filters_by_status(db):
     assert [r["user_id"] for r in pending] == [111]
     assert [r["user_id"] for r in approved] == [222]
     assert len(db.list_trainees()) == 2
+
+
+def test_list_audit_users_groups_and_uses_latest_name(db):
+    db.log_action(111, "Alice", "book")
+    db.log_action(222, "Bob", "book")
+    db.log_action(111, "Alice Cohen", "cancel")  # renamed since first action
+    rows = db.list_audit_users()
+    assert [(r["user_id"], r["user_name"], r["actions"]) for r in rows] == [
+        (111, "Alice Cohen", 2),  # most recently active first
+        (222, "Bob", 1),
+    ]

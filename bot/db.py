@@ -520,6 +520,18 @@ class Database:
             (user_id, limit),
         ).fetchall()
 
+    def list_audit_users(self) -> list[sqlite3.Row]:
+        """Everyone who appears in the audit log (trainees and admins alike),
+        with their most recent recorded name and action count, most recently
+        active first."""
+        return self.conn.execute(
+            "SELECT user_id, "
+            "  (SELECT user_name FROM audit_log a2 WHERE a2.user_id = a1.user_id "
+            "   ORDER BY id DESC LIMIT 1) AS user_name, "
+            "  COUNT(*) AS actions "
+            "FROM audit_log a1 GROUP BY user_id ORDER BY MAX(id) DESC"
+        ).fetchall()
+
     # --- trainee registration / approval ---
 
     def register_trainee(self, user_id: int, full_name: str, phone: str) -> None:
