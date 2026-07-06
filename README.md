@@ -53,7 +53,7 @@ Trainer only:
 | `/addadmin <id>` | Grant another Telegram user full admin access (same as tapping ➕ הוספת מנהל) |
 | `/deladmin <id>` | Revoke an admin added this way (the primary `TRAINER_ID` can't be removed) |
 | `/auditlog` | Sends the audit log as a `.txt` file (up to the last 1000 actions) — bookings, cancellations, schedule edits, admin changes — with who did what and when |
-| `/userlog [id]` | Per-user activity log as a `.txt` file. Without an id, shows a button list of everyone with activity (trainees and admins, 🛡 marks admins) — tap one to get that person's file |
+| `/userlog [id]` | **Super admin only** (`TRAINER_ID` from `.env`, not added admins). Per-user activity log as a `.txt` file. Without an id, shows a button list of everyone with activity (trainees and admins, 🛡 marks admins) — tap one to get that person's file |
 | `/pending` | List trainee registrations awaiting approval, with Approve/Reject buttons (also sent automatically as they come in) |
 | `/trainees` | Link to a browser view of every trainee (name, phone, status) and, per trainee, their full history — self-hosted mini app only |
 

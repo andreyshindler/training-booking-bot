@@ -72,9 +72,12 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("addadmin", "הוספת מנהל"),
     BotCommand("deladmin", "הסרת מנהל"),
     BotCommand("auditlog", "יומן פעולות"),
-    BotCommand("userlog", "יומן פעילות למשתמש"),
     BotCommand("pending", "בקשות הרשמה ממתינות"),
     BotCommand("trainees", "רשימת מתאמנים (קישור לדפדפן)"),
+]
+# Commands reserved for the super admin (TRAINER_ID from .env) only.
+SUPER_ADMIN_COMMANDS = TRAINER_COMMANDS + [
+    BotCommand("userlog", "יומן פעילות למשתמש"),
 ]
 
 
@@ -86,15 +89,15 @@ async def setup_commands_menu(app: Application) -> None:
     # Telegram rejects chat-scoped commands ("Chat not found") until each admin
     # has opened a chat with the bot, so this must not be fatal; it is retried
     # when that admin sends /start.
-    await _set_trainer_menu(app.bot, cfg.trainer_id)
+    await _set_trainer_menu(app.bot, cfg.trainer_id, commands=SUPER_ADMIN_COMMANDS)
     for row in db.list_admins():
         await _set_trainer_menu(app.bot, row["user_id"])
 
 
-async def _set_trainer_menu(bot, trainer_id: int) -> bool:
+async def _set_trainer_menu(bot, trainer_id: int, commands=TRAINER_COMMANDS) -> bool:
     try:
         await bot.set_my_commands(
-            TRAINER_COMMANDS, scope=BotCommandScopeChat(chat_id=trainer_id)
+            commands, scope=BotCommandScopeChat(chat_id=trainer_id)
         )
         return True
     except TelegramError as exc:
@@ -119,6 +122,11 @@ def _is_trainer_id(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     if user_id == _cfg(context).trainer_id:
         return True
     return _db(context).is_admin(user_id)
+
+
+def _is_super_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """The one primary admin from .env (TRAINER_ID), not added admins."""
+    return update.effective_user.id == _cfg(context).trainer_id
 
 
 def _is_trainer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -235,7 +243,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_trainer = _is_trainer(update, context)
     if is_trainer:
         # The chat now definitely exists, so this admin's menu can be registered.
-        await _set_trainer_menu(context.bot, update.effective_user.id)
+        await _set_trainer_menu(
+            context.bot,
+            update.effective_user.id,
+            commands=SUPER_ADMIN_COMMANDS
+            if _is_super_admin(update, context)
+            else TRAINER_COMMANDS,
+        )
         db, cfg = _db(context), _cfg(context)
         if update.effective_user.id != cfg.trainer_id and db.is_admin(update.effective_user.id):
             # Refresh their display name now that we actually have it (they were
@@ -1261,7 +1275,11 @@ async def _send_user_audit_file(message, context, target_id: int) -> None:
 
 
 async def user_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_trainer(update, context):
+    if not _is_super_admin(update, context):
+        if _is_trainer(update, context):
+            await update.message.reply_text(
+                "יומני פעילות אישיים זמינים רק למנהל הראשי."
+            )
         return
     _log(context, update.effective_user, "view_user_log")
     if context.args and context.args[0].lstrip("#").isdigit():
@@ -1299,7 +1317,7 @@ async def user_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _handle_user_log(query, context, payload: str) -> None:
-    if not _is_trainer_id(context, query.from_user.id):
+    if query.from_user.id != _cfg(context).trainer_id:
         return
     if not payload.isdigit():
         return
