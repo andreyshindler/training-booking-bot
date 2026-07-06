@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS quota_ledger (
     delta INTEGER NOT NULL,
     reason TEXT NOT NULL,
     ref TEXT NOT NULL DEFAULT '',
+    purchase_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -188,6 +189,17 @@ class Database:
                 PRAGMA foreign_keys = ON;
                 """
             )
+
+        booking_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(bookings)")
+        }
+        if "purchase_id" not in booking_cols:
+            self.conn.execute("ALTER TABLE bookings ADD COLUMN purchase_id INTEGER")
+        ledger_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(quota_ledger)")
+        }
+        if "purchase_id" not in ledger_cols:
+            self.conn.execute("ALTER TABLE quota_ledger ADD COLUMN purchase_id INTEGER")
 
     # --- recurring weekly slots (managed by the trainer) ---
 
@@ -431,37 +443,14 @@ class Database:
             (user_id, from_day.isoformat()),
         ).fetchall()
 
-    def promote_next_waitlisted(
-        self, slot_id: int, day: date, require_quota: bool = False
-    ) -> tuple[sqlite3.Row | None, int | None, list[sqlite3.Row]]:
-        """Pop the earliest waitlisted user for this session and book them.
-
-        Returns (waitlist_row, new_booking_id, skipped_rows). The promoted
-        pair is (None, None) if nobody bookable was waiting. With
-        ``require_quota``, entries whose quota balance is empty are removed
-        and returned in ``skipped_rows`` so the caller can notify them.
-        If booking the next-in-line somehow fails (edge case), tries the one
-        after them instead.
-        """
-        skipped: list[sqlite3.Row] = []
-        while True:
-            entry = self.conn.execute(
-                "SELECT * FROM waitlist WHERE slot_id = ? AND date = ? "
-                "ORDER BY created_at LIMIT 1",
-                (slot_id, day.isoformat()),
-            ).fetchone()
-            if entry is None:
-                return None, None, skipped
-            with self.conn:
-                self.conn.execute("DELETE FROM waitlist WHERE id = ?", (entry["id"],))
-            if require_quota and self.quota_balance(entry["user_id"]) <= 0:
-                skipped.append(entry)
-                continue
-            try:
-                booking_id = self.book(slot_id, day, entry["user_id"], entry["user_name"])
-            except (SlotFullError, SlotTakenError):
-                continue
-            return entry, booking_id, skipped
+    def leave_waitlist_for(self, slot_id: int, day: date, user_id: int) -> bool:
+        """Drop the user's waitlist entry for a session (e.g. once they booked it)."""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM waitlist WHERE slot_id = ? AND date = ? AND user_id = ?",
+                (slot_id, day.isoformat(), user_id),
+            )
+        return cur.rowcount > 0
 
     def prune_stale_waitlist(self, today: date) -> None:
         with self.conn:
@@ -585,13 +574,70 @@ class Database:
         ).fetchone()
         return row["balance"]
 
-    def add_quota(self, user_id: int, delta: int, reason: str, ref: str = "") -> None:
+    def add_quota(
+        self,
+        user_id: int,
+        delta: int,
+        reason: str,
+        ref: str = "",
+        purchase_id: int | None = None,
+    ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO quota_ledger (user_id, delta, reason, ref) "
-                "VALUES (?, ?, ?, ?)",
-                (user_id, delta, reason, ref),
+                "INSERT INTO quota_ledger (user_id, delta, reason, ref, purchase_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, delta, reason, ref, purchase_id),
             )
+
+    def purchases_for_user(self, user_id: int) -> list[sqlite3.Row]:
+        """Approved package purchases with per-purchase usage, oldest first.
+
+        Each row: purchase id, sessions, price, used, remaining. ``used`` is
+        the net consumption attributed to that purchase (bookings minus
+        cancellation refunds)."""
+        return self.conn.execute(
+            "SELECT r.id, r.user_id, p.sessions, p.price, r.decided_at, "
+            "  (SELECT COALESCE(-SUM(delta), 0) FROM quota_ledger q "
+            "   WHERE q.purchase_id = r.id AND q.reason != 'package') AS used, "
+            "  p.sessions - (SELECT COALESCE(-SUM(delta), 0) FROM quota_ledger q "
+            "   WHERE q.purchase_id = r.id AND q.reason != 'package') AS remaining "
+            "FROM package_requests r JOIN packages p ON p.id = r.package_id "
+            "WHERE r.user_id = ? AND r.status = 'approved' ORDER BY r.id",
+            (user_id,),
+        ).fetchall()
+
+    def consume_session(self, user_id: int, booking_id: int) -> int | None:
+        """Deduct one session for a booking, attributed to the oldest purchase
+        that still has sessions left (FIFO). Falls back to an unattributed
+        deduction (manual credits) when no purchase has a remainder. Returns
+        the purchase id the session was taken from, or None."""
+        purchase_id = None
+        for purchase in self.purchases_for_user(user_id):
+            if purchase["remaining"] > 0:
+                purchase_id = purchase["id"]
+                break
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO quota_ledger (user_id, delta, reason, ref, purchase_id) "
+                "VALUES (?, -1, 'booking', ?, ?)",
+                (user_id, str(booking_id), purchase_id),
+            )
+            self.conn.execute(
+                "UPDATE bookings SET purchase_id = ? WHERE id = ?",
+                (purchase_id, booking_id),
+            )
+        return purchase_id
+
+    def refund_session(self, booking_row) -> None:
+        """Return a cancelled booking's session to the same purchase it was
+        taken from (or to the unattributed pool)."""
+        self.add_quota(
+            booking_row["user_id"],
+            1,
+            "cancel_refund",
+            str(booking_row["id"]),
+            purchase_id=booking_row["purchase_id"],
+        )
 
     def pending_package_request(self, user_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -645,9 +691,9 @@ class Database:
             )
             if status == "approved":
                 self.conn.execute(
-                    "INSERT INTO quota_ledger (user_id, delta, reason, ref) "
-                    "VALUES (?, ?, 'package', ?)",
-                    (row["user_id"], row["sessions"], str(request_id)),
+                    "INSERT INTO quota_ledger (user_id, delta, reason, ref, purchase_id) "
+                    "VALUES (?, ?, 'package', ?, ?)",
+                    (row["user_id"], row["sessions"], str(request_id), request_id),
                 )
         return row
 

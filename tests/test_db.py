@@ -231,26 +231,14 @@ def test_leave_waitlist(db):
     assert db.waitlist_for_slot(slot_id, day) == []
 
 
-def test_promote_next_waitlisted_books_earliest_in_line(db):
-    slot_id = db.add_slot(0, "10:00")  # capacity 1
+def test_leave_waitlist_for_removes_only_that_users_entry(db):
+    slot_id = db.add_slot(0, "10:00")
     day = date(2026, 7, 6)
-    booking_id = db.book(slot_id, day, 111, "Alice")
     db.join_waitlist(slot_id, day, 222, "Bob")
     db.join_waitlist(slot_id, day, 333, "Carol")
-
-    db.cancel_booking(booking_id)
-    entry, new_booking_id, skipped = db.promote_next_waitlisted(slot_id, day)
-    assert entry is not None and skipped == []
-    assert entry["user_name"] == "Bob"
-    roster = db.bookings_for_slot(slot_id, day)
-    assert [r["user_name"] for r in roster] == ["Bob"]
-    # Carol is still waiting; Bob is gone from the waitlist
+    assert db.leave_waitlist_for(slot_id, day, 222) is True
+    assert db.leave_waitlist_for(slot_id, day, 222) is False
     assert [r["user_name"] for r in db.waitlist_for_slot(slot_id, day)] == ["Carol"]
-
-
-def test_promote_next_waitlisted_returns_none_when_empty(db):
-    slot_id = db.add_slot(0, "10:00")
-    assert db.promote_next_waitlisted(slot_id, date(2026, 7, 6)) == (None, None, [])
 
 
 def test_waitlist_for_user_and_prune_stale(db):
@@ -467,19 +455,40 @@ def test_package_request_reject_gives_no_quota(db):
     assert db.quota_balance(111) == 0
 
 
-def test_promote_next_waitlisted_skips_users_without_quota(db):
-    db.add_package(5, 250)  # turns quota enforcement on
-    slot_id = db.add_slot(0, "10:00")  # capacity 1
-    day = date(2026, 7, 6)
-    db.add_quota(333, 2, "package", "x")  # only Carol has quota
-    booking_id = db.book(slot_id, day, 111, "Alice")
-    db.join_waitlist(slot_id, day, 222, "Bob")    # first in line, no quota
-    db.join_waitlist(slot_id, day, 333, "Carol")
+def test_consume_session_attributes_fifo_and_refund_returns_to_same_purchase(db):
+    pkg = db.add_package(2, 100)
+    slot_id = db.add_slot(0, "10:00", 60, capacity=9)
+    req1 = db.create_package_request(111, "Alice", pkg)
+    db.decide_package_request(req1, "approved", decided_by=1)
+    req2 = db.create_package_request(111, "Alice", pkg)
+    db.decide_package_request(req2, "approved", decided_by=1)
 
-    db.cancel_booking(booking_id)
-    entry, new_booking_id, skipped = db.promote_next_waitlisted(
-        slot_id, day, require_quota=True
-    )
-    assert entry["user_name"] == "Carol" and new_booking_id is not None
-    assert [r["user_name"] for r in skipped] == ["Bob"]
-    assert db.waitlist_for_slot(slot_id, day) == []
+    # three bookings: first two consume purchase #1, third rolls to #2
+    ids = [db.book(slot_id, date(2026, 7, 6 + 7 * i), 111, "Alice") for i in range(3)]
+    assert db.consume_session(111, ids[0]) == req1
+    assert db.consume_session(111, ids[1]) == req1
+    assert db.consume_session(111, ids[2]) == req2
+    p1, p2 = db.purchases_for_user(111)
+    assert (p1["used"], p1["remaining"]) == (2, 0)
+    assert (p2["used"], p2["remaining"]) == (1, 1)
+    assert db.get_booking(ids[0])["purchase_id"] == req1
+    assert db.get_booking(ids[2])["purchase_id"] == req2
+
+    # cancelling booking #2 refunds purchase #1 specifically
+    row = db.get_booking(ids[1])
+    db.cancel_booking(ids[1])
+    db.refund_session(row)
+    p1, p2 = db.purchases_for_user(111)
+    assert (p1["used"], p1["remaining"]) == (1, 1)
+    assert (p2["used"], p2["remaining"]) == (1, 1)
+    assert db.quota_balance(111) == 2
+
+
+def test_consume_session_without_purchase_uses_manual_credit(db):
+    db.add_package(5, 250)  # enforcement on, but user 111 bought nothing
+    db.add_quota(111, 1, "manual", "gift")
+    slot_id = db.add_slot(0, "10:00")
+    booking_id = db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    assert db.consume_session(111, booking_id) is None
+    assert db.quota_balance(111) == 0
+    assert db.get_booking(booking_id)["purchase_id"] is None

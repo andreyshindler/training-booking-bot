@@ -714,8 +714,12 @@ async def _handle_book(query, context, payload: str) -> None:
 
     quota_note = ""
     if quota_enforced:
-        db.add_quota(user.id, -1, "booking", str(booking_id))
+        purchase_id = db.consume_session(user.id, booking_id)
         quota_note = f"\nנותרו לכם {db.quota_balance(user.id)} אימונים ביתרה."
+        if purchase_id is not None:
+            quota_note += f" (חבילה #{purchase_id})"
+    # if they were waiting for this exact session, the wait is over
+    db.leave_waitlist_for(slot_id, day, user.id)
 
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
     await query.edit_message_text(
@@ -869,7 +873,7 @@ async def _handle_cancel(query, context, payload: str) -> None:
     quota_enforced = db.quota_enforced()
     refund_note = ""
     if quota_enforced and not _is_trainer_id(context, row["user_id"]):
-        db.add_quota(row["user_id"], 1, "cancel_refund", str(booking_id))
+        db.refund_session(row)
         if row["user_id"] == query.from_user.id:
             refund_note = (
                 f"\nהיתרה שלכם הוחזרה: {db.quota_balance(row['user_id'])} אימונים."
@@ -879,34 +883,39 @@ async def _handle_cancel(query, context, payload: str) -> None:
     if not is_trainer:
         await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
 
-    promoted, promoted_booking_id, skipped = db.promote_next_waitlisted(
-        row["slot_id"], date.fromisoformat(row["date"]), require_quota=quota_enforced
-    )
-    for entry in skipped:
+    # A spot opened up: nobody is booked automatically — everyone on the
+    # waitlist is invited, first tap wins (the booking path re-checks
+    # capacity, quota, and the trainee gate).
+    day = date.fromisoformat(row["date"])
+    for entry in db.waitlist_for_slot(row["slot_id"], day):
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ הרשמה למועד",
+                        callback_data=f"book|{row['slot_id']}|{row['date']}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ הסרה מרשימת ההמתנה",
+                        callback_data=f"waitlistleave|{entry['id']}",
+                    )
+                ],
+            ]
+        )
         try:
             await context.bot.send_message(
                 entry["user_id"],
-                f"התפנה מקום באימון {label}, אבל אין לכם יתרת אימונים ולכן "
-                f"ההרשמה עברה לבא בתור. אפשר לרכוש חבילה דרך {BTN_PACKAGES}.",
-            )
-        except TelegramError as exc:
-            logger.warning("Could not notify skipped user %s: %s", entry["user_id"], exc)
-        db.log_action(entry["user_id"], entry["user_name"], "waitlist_skipped_no_quota", label)
-    if promoted is not None:
-        if quota_enforced and not _is_trainer_id(context, promoted["user_id"]):
-            db.add_quota(promoted["user_id"], -1, "booking", str(promoted_booking_id))
-        try:
-            await context.bot.send_message(
-                promoted["user_id"],
-                f"🎉 התפנה מקום ונרשמתם אוטומטית לאימון: {label}\nנתראה באימון!\n\n"
-                "אפשר להוסיף תזכורות (ניתן לבחור כמה):",
-                reply_markup=_reminder_keyboard(db, promoted_booking_id),
+                f"🔔 התפנה מקום באימון {label}!\n"
+                "ההרשמה על בסיס כל הקודם זוכה — לחצו כדי להירשם:",
+                reply_markup=keyboard,
             )
         except TelegramError as exc:
             logger.warning(
-                "Could not notify waitlisted user %s: %s", promoted["user_id"], exc
+                "Could not notify waitlisted user %s: %s", entry["user_id"], exc
             )
-        db.log_action(promoted["user_id"], promoted["user_name"], "waitlist_promoted", label)
+        db.log_action(entry["user_id"], entry["user_name"], "waitlist_spot_notified", label)
 
 
 def _session_keyboard(db: Database, rows) -> InlineKeyboardMarkup:
@@ -978,6 +987,16 @@ def _package_label(row) -> str:
     return f"חבילת {row['sessions']} אימונים — {_fmt_price(row['price'])} ₪"
 
 
+def _purchase_line(p) -> str:
+    line = (
+        f"חבילה #{p['id']} ({p['sessions']} אימונים): "
+        f"נוצלו {p['used']}, נותרו {p['remaining']}"
+    )
+    if p["remaining"] <= 0:
+        line += " ✔️ נוצלה במלואה"
+    return line
+
+
 async def packages_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = _db(context)
     user = update.effective_user
@@ -989,6 +1008,11 @@ async def packages_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _log(context, user, "view_packages")
     balance = db.quota_balance(user.id)
     text = f"היתרה שלכם: {balance} אימונים"
+    purchases = db.purchases_for_user(user.id)
+    if purchases:
+        text += "\n\nהחבילות שלכם:"
+        for p in purchases:
+            text += f"\n{_purchase_line(p)}"
     packages = db.list_packages()
     keyboard = None
     pending = db.pending_package_request(user.id)
@@ -1097,6 +1121,7 @@ async def packages_admin_command(update: Update, context: ContextTypes.DEFAULT_T
         "/setprice <מספר> <מחיר> — עדכון מחיר",
         "/delpackage <מספר> — הסרת חבילה",
         "/addquota <מזהה משתמש> <כמות> — זיכוי/חיוב ידני",
+        "/userpackages <מזהה משתמש> — ניצול חבילות של מתאמן",
     ]
     pending = db.list_pending_package_requests()
     await update.message.reply_text("\n".join(lines))
@@ -1166,6 +1191,29 @@ async def del_package_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await update.message.reply_text("אין חבילה פעילה עם המספר הזה. ראו /packages.")
+
+
+async def user_packages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: per-purchase usage report for one user — verifies a package was
+    fully used before selling the next one."""
+    if not _is_trainer(update, context):
+        return
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text("שימוש: /userpackages <מזהה משתמש>")
+        return
+    db = _db(context)
+    target_id = int(context.args[0].lstrip("#"))
+    _log(context, update.effective_user, "view_user_packages", f"ID: {target_id}")
+    purchases = db.purchases_for_user(target_id)
+    balance = db.quota_balance(target_id)
+    if not purchases:
+        await update.message.reply_text(
+            f"למשתמש {target_id} אין חבילות מאושרות. יתרה (מזיכויים ידניים): {balance}."
+        )
+        return
+    lines = [f"חבילות של {target_id} (יתרה כוללת: {balance}):"]
+    lines += [_purchase_line(p) for p in purchases]
+    await update.message.reply_text("\n".join(lines))
 
 
 async def add_quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1477,7 +1525,8 @@ _ACTION_LABELS = {
     "delpackage": "הסרת חבילה",
     "setprice": "עדכון מחיר חבילה",
     "add_quota": "עדכון יתרה ידני",
-    "waitlist_skipped_no_quota": "דילוג ברשימת המתנה (אין יתרה)",
+    "view_user_packages": "צפייה בניצול חבילות של מתאמן",
+    "waitlist_spot_notified": "התראה על מקום שהתפנה",
     "book": "הזמנת אימון",
     "cancel": "ביטול אימון",
     "waitlist_join": "הצטרפות לרשימת המתנה",
@@ -1638,6 +1687,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("setprice", set_price_command))
     app.add_handler(CommandHandler("delpackage", del_package_command))
     app.add_handler(CommandHandler("addquota", add_quota_command))
+    app.add_handler(CommandHandler("userpackages", user_packages_command))
     app.add_handler(CommandHandler("pending", pending_command))
     app.add_handler(CommandHandler("trainees", trainees_command))
     app.add_handler(CallbackQueryHandler(on_callback))

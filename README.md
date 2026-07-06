@@ -16,8 +16,10 @@ trainer's predefined weekly schedule.
   approved. A rejected trainee can just send `/start` again to retry.
 - **Trainees** run `/book`, see the open slots for the next N days as buttons,
   and tap one to book it. A slot can hold as many participants as its
-  capacity allows; once full, trainees can join a waiting list and are
-  automatically booked (with a notification) the moment someone cancels.
+  capacity allows; once full, trainees can join a waiting list. When someone
+  cancels, everyone on that session's waitlist is notified that a spot opened
+  with a one-tap register button — nobody is booked automatically, first to
+  tap wins.
   A trainee can hold only one active booking of a given recurring slot at a
   time — they can book the next week's occurrence only after the current
   one has ended.
@@ -59,6 +61,7 @@ Trainer only:
 | `/setprice <id> <price>` | Change a package's price |
 | `/delpackage <id>` | Remove a package (existing balances are kept) |
 | `/addquota <user_id> <n>` | Manually credit (or debit, with a negative n) a user's session balance |
+| `/userpackages <user_id>` | Per-purchase usage report for one trainee (used/remaining per package instance) |
 | `/pending` | List trainee registrations awaiting approval, with Approve/Reject buttons (also sent automatically as they come in) |
 | `/trainees` | Link to a browser view of every trainee (name, phone, status) and, per trainee, their full history — self-hosted mini app only |
 
@@ -80,8 +83,11 @@ balance.
   credits the sessions (payment itself happens outside the bot). One pending
   request per user at a time.
 - Booking requires a positive balance and deducts one session; the remaining
-  balance is shown after each booking. Waitlist promotions also require (and
-  deduct) balance — users without balance are skipped and notified.
+  balance is shown after each booking. Every approved purchase has a unique
+  id, each booking is attributed to a specific purchase (oldest with sessions
+  left, FIFO), and cancellations refund that same purchase — so
+  `/userpackages <user_id>` can always show exactly how much of each package
+  a trainee used (trainees see the same breakdown in their 🎫 view).
 - Cancelling is allowed up to **24 hours** before the session and restores
   the session to the balance; closer than that, the trainee cannot cancel
   (the admin still can from the roster view, which does refund).
