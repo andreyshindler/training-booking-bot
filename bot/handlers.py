@@ -53,6 +53,8 @@ BTN_SCHEDULE = "📋 המערכת השבועית"
 BTN_ALL = "👥 כל האימונים"
 BTN_EDIT = "⚙️ עריכת המערכת"
 BTN_ADD_ADMIN = "➕ הוספת מנהל"
+BTN_PENDING = "⏳ בקשות ממתינות"
+BTN_TRAINEES = "👤 מתאמנים"
 
 # Telegram requires command names in Latin letters; the labels are Hebrew.
 TRAINEE_COMMANDS = [
@@ -204,6 +206,7 @@ def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> Repl
     rows = [[KeyboardButton(BTN_BOOK), KeyboardButton(BTN_MY)]]
     if is_trainer:
         rows.append([KeyboardButton(BTN_SCHEDULE), KeyboardButton(BTN_ALL)])
+        rows.append([KeyboardButton(BTN_PENDING), KeyboardButton(BTN_TRAINEES)])
         rows.append([KeyboardButton(BTN_ADD_ADMIN)])
         cfg = _cfg(context)
         if cfg.webapp_url:
@@ -242,6 +245,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{BTN_EDIT} — עריכת המערכת השבועית במסך נוח\n"
             f"{BTN_SCHEDULE} — הצגת המערכת השבועית\n"
             f"{BTN_ALL} — האימונים הקרובים שהוזמנו\n"
+            f"{BTN_PENDING} — בקשות הרשמה ממתינות\n"
+            f"{BTN_TRAINEES} — רשימת מתאמנים (קישור לדפדפן)\n"
             f"{BTN_ADD_ADMIN} — הוספת מנהל נוסף\n\n"
             "אפשר גם בפקודות: /addslot שני 10:00 60 או /delslot <מספר>"
         )
@@ -472,6 +477,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await schedule(update, context)
     elif text == BTN_ALL:
         await bookings(update, context)
+    elif text == BTN_PENDING:
+        await pending_command(update, context)
+    elif text == BTN_TRAINEES:
+        await trainees_command(update, context)
     elif text == BTN_ADD_ADMIN:
         await add_admin_prompt(update, context)
 
@@ -1137,6 +1146,7 @@ async def list_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_trainer(update, context):
         return
+    _log(context, update.effective_user, "view_pending")
     rows = _db(context).list_trainees(status="pending")
     if not rows:
         await update.message.reply_text("אין בקשות הרשמה ממתינות.")
@@ -1181,6 +1191,7 @@ _ACTION_LABELS = {
     "approved_trainee": "אישור מתאמן",
     "rejected_trainee": "דחיית מתאמן",
     "view_trainees": "בקשת קישור למתאמנים",
+    "view_pending": "צפייה בבקשות ממתינות",
 }
 
 

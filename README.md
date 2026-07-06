@@ -64,8 +64,9 @@ including adding/removing other admins. Admins are stored in the database
 
 `/start` pins an always-visible button keyboard in the chat, so nobody has to
 type commands: trainees get `📅 הזמנת אימון` and `🗓 האימונים שלי`; every admin
-additionally gets `📋 המערכת השבועית`, `👥 כל האימונים`, `➕ הוספת מנהל`, and —
-when the mini app is configured — `⚙️ עריכת המערכת`.
+additionally gets `📋 המערכת השבועית`, `👥 כל האימונים`, `⏳ בקשות ממתינות`,
+`👤 מתאמנים`, `➕ הוספת מנהל`, and — when the mini app is configured —
+`⚙️ עריכת המערכת`.
 
 ## Schedule-editing mini app (trainer)
 
