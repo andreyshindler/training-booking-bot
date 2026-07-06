@@ -344,3 +344,56 @@ def test_list_audit_log_respects_limit(db):
     rows = db.list_audit_log(limit=3)
     assert len(rows) == 3
     assert rows[0]["details"] == "4"  # most recent first
+
+
+def test_list_audit_log_for_user_filters_by_user(db):
+    db.log_action(111, "Alice", "book", "Monday")
+    db.log_action(222, "Bob", "book", "Tuesday")
+    db.log_action(111, "Alice", "cancel", "Monday")
+    rows = db.list_audit_log_for_user(111)
+    assert [r["action"] for r in rows] == ["cancel", "book"]
+    assert all(r["user_id"] == 111 for r in rows)
+
+
+# --- trainee registration / approval ---
+
+
+def test_register_trainee_defaults_to_pending(db):
+    assert db.get_trainee(111) is None
+    db.register_trainee(111, "Alice Smith", "0501234567")
+    row = db.get_trainee(111)
+    assert row["full_name"] == "Alice Smith"
+    assert row["phone"] == "0501234567"
+    assert row["status"] == "pending"
+    assert row["decided_at"] is None
+
+
+def test_set_trainee_status_approve(db):
+    db.register_trainee(111, "Alice", "0501234567")
+    db.set_trainee_status(111, "approved", decided_by=999)
+    row = db.get_trainee(111)
+    assert row["status"] == "approved"
+    assert row["decided_by"] == 999
+    assert row["decided_at"] is not None
+
+
+def test_reregister_after_rejection_resets_to_pending(db):
+    db.register_trainee(111, "Alice", "0501234567")
+    db.set_trainee_status(111, "rejected", decided_by=999)
+    db.register_trainee(111, "Alice S.", "0509999999")  # retried with a correction
+    row = db.get_trainee(111)
+    assert row["status"] == "pending"
+    assert row["full_name"] == "Alice S."
+    assert row["phone"] == "0509999999"
+    assert row["decided_at"] is None
+
+
+def test_list_trainees_filters_by_status(db):
+    db.register_trainee(111, "Alice", "1")
+    db.register_trainee(222, "Bob", "2")
+    db.set_trainee_status(222, "approved", decided_by=999)
+    pending = db.list_trainees(status="pending")
+    approved = db.list_trainees(status="approved")
+    assert [r["user_id"] for r in pending] == [111]
+    assert [r["user_id"] for r in approved] == [222]
+    assert len(db.list_trainees()) == 2

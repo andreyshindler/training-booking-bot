@@ -28,18 +28,39 @@ def main() -> None:
     app.bot_data[CFG] = cfg
     register_handlers(app)
     if cfg.webapp_url and cfg.webapp_secret:
+        # sqlite3 connections may only be used from the thread that created
+        # them; the webapp server runs its own background thread(s), so each
+        # callable opens (and closes) a fresh connection per request rather
+        # than sharing the main thread's `db`.
         def get_payload():
-            # sqlite3 connections may only be used from the thread that
-            # created them; the webapp server runs its own background
-            # thread(s), so open (and close) a fresh connection per request
-            # rather than sharing the main thread's `db`.
             webapp_db = Database(cfg.db_path)
             try:
                 return mini_app_payload(cfg, webapp_db)
             finally:
                 webapp_db.close()
 
-        start_webapp_server(cfg.webapp_secret, cfg.webapp_port, get_payload)
+        def list_trainees():
+            webapp_db = Database(cfg.db_path)
+            try:
+                return webapp_db.list_trainees()
+            finally:
+                webapp_db.close()
+
+        def get_trainee_history(user_id_str):
+            webapp_db = Database(cfg.db_path)
+            try:
+                if not user_id_str.isdigit():
+                    return None, []
+                user_id = int(user_id_str)
+                trainee = webapp_db.get_trainee(user_id)
+                history = webapp_db.list_audit_log_for_user(user_id) if trainee else []
+                return trainee, history
+            finally:
+                webapp_db.close()
+
+        start_webapp_server(
+            cfg.webapp_secret, cfg.webapp_port, get_payload, list_trainees, get_trainee_history
+        )
     if app.job_queue is not None:
         app.job_queue.run_repeating(send_due_reminders, interval=60, first=10)
     else:

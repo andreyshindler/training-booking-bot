@@ -14,6 +14,7 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
     WebAppInfo,
 )
@@ -69,6 +70,8 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("addadmin", "הוספת מנהל"),
     BotCommand("deladmin", "הסרת מנהל"),
     BotCommand("auditlog", "יומן פעולות"),
+    BotCommand("pending", "בקשות הרשמה ממתינות"),
+    BotCommand("trainees", "רשימת מתאמנים (קישור לדפדפן)"),
 ]
 
 
@@ -217,6 +220,13 @@ def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> Repl
 
 # --- shared commands ---
 
+_TRAINEE_WELCOME = (
+    "ברוכים הבאים! כאן מזמינים אימונים אצל המאמן.\n"
+    f"{BTN_BOOK} — הצגת מועדים פנויים והזמנת אימון\n"
+    f"{BTN_MY} — האימונים הקרובים שלכם (עם אפשרות ביטול)"
+)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_trainer = _is_trainer(update, context)
     if is_trainer:
@@ -235,21 +245,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{BTN_ADD_ADMIN} — הוספת מנהל נוסף\n\n"
             "אפשר גם בפקודות: /addslot שני 10:00 60 או /delslot <מספר>"
         )
-    else:
-        text = (
-            "ברוכים הבאים! כאן מזמינים אימונים אצל המאמן.\n"
-            f"{BTN_BOOK} — הצגת מועדים פנויים והזמנת אימון\n"
-            f"{BTN_MY} — האימונים הקרובים שלכם (עם אפשרות ביטול)"
+        await update.message.reply_text(text, reply_markup=_main_keyboard(context, is_trainer=True))
+        return
+
+    trainee = _db(context).get_trainee(update.effective_user.id)
+    if trainee is None or trainee["status"] == "rejected":
+        context.user_data["registration_step"] = "name"
+        await update.message.reply_text(
+            "ברוכים הבאים! כדי להזמין אימונים צריך להירשם קודם.\n"
+            "מה השם המלא שלכם?",
+            reply_markup=ReplyKeyboardRemove(),
         )
-    await update.message.reply_text(
-        text, reply_markup=_main_keyboard(context, is_trainer)
-    )
+        return
+    if trainee["status"] == "pending":
+        await update.message.reply_text(
+            "ההרשמה שלכם התקבלה וממתינה לאישור המאמן. תקבלו הודעה ברגע שהיא תאושר."
+        )
+        return
+    # approved
+    await update.message.reply_text(_TRAINEE_WELCOME, reply_markup=_main_keyboard(context, is_trainer=False))
 
 
 # --- trainee commands ---
 
+def _trainee_gate_message(db: Database, user_id: int) -> str | None:
+    """None if this (non-admin) user may book; otherwise the message to show instead."""
+    trainee = db.get_trainee(user_id)
+    if trainee is None:
+        return "צריך להירשם קודם. שלחו /start כדי להתחיל."
+    if trainee["status"] == "pending":
+        return "ההרשמה שלכם עדיין ממתינה לאישור המאמן."
+    if trainee["status"] == "rejected":
+        return "בקשת ההרשמה שלכם נדחתה. אפשר לשלוח /start כדי לנסות שוב."
+    return None  # approved
+
+
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db, cfg = _db(context), _cfg(context)
+    if not _is_trainer(update, context):
+        blocked = _trainee_gate_message(db, update.effective_user.id)
+        if blocked:
+            await update.message.reply_text(blocked)
+            return
     _log(context, update.effective_user, "view_book")
     now = _now(context)
     one_time = db.list_one_time_slots(now.date(), now.date() + timedelta(days=cfg.booking_days_ahead))
@@ -339,7 +376,90 @@ def _fmt_booking(row) -> str:
 
 # --- reply-keyboard button presses (arrive as plain text) ---
 
+BTN_SHARE_PHONE = "📱 שיתוף מספר טלפון"
+
+
+def _looks_like_phone(text: str) -> bool:
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return len(digits) >= 7
+
+
+async def _notify_admins_new_registration(context: ContextTypes.DEFAULT_TYPE, user_id: int, name: str, phone: str) -> None:
+    cfg, db = _cfg(context), _db(context)
+    admin_ids = [cfg.trainer_id] + [row["user_id"] for row in db.list_admins()]
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ אישור", callback_data=f"approve_trainee|{user_id}"),
+                InlineKeyboardButton("❌ דחייה", callback_data=f"reject_trainee|{user_id}"),
+            ]
+        ]
+    )
+    text = f"בקשת הרשמה חדשה:\n👤 {name}\n📱 {phone}\n🆔 {user_id}"
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(admin_id, text, reply_markup=keyboard)
+        except TelegramError as exc:
+            logger.warning("Could not notify admin %s of new registration: %s", admin_id, exc)
+
+
+async def _finish_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, phone: str) -> None:
+    db = _db(context)
+    user = update.effective_user
+    name = context.user_data.pop("registration_name", _display_name(user))
+    context.user_data.pop("registration_step", None)
+    db.register_trainee(user.id, name, phone)
+    _log(context, user, "register", f"{name} / {phone}")
+    await update.message.reply_text(
+        "תודה! הבקשה שלכם נשלחה למאמן וממתינה לאישור. תקבלו הודעה ברגע שהיא תאושר.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await _notify_admins_new_registration(context, user.id, name, phone)
+
+
+async def _handle_registration_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    name = (update.message.text or "").strip()
+    if not name:
+        await update.message.reply_text("צריך לשלוח שם. מה השם המלא שלכם?")
+        return
+    context.user_data["registration_name"] = name
+    context.user_data["registration_step"] = "phone"
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton(BTN_SHARE_PHONE, request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.message.reply_text(
+        "תודה! עכשיו שתפו את מספר הטלפון שלכם (או הקלידו אותו):",
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_registration_phone_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    phone = (update.message.text or "").strip()
+    if not _looks_like_phone(phone):
+        await update.message.reply_text(
+            f"זה לא נראה כמו מספר טלפון תקין. אפשר לשתף עם {BTN_SHARE_PHONE} "
+            "או להקליד מספר, למשל 0501234567."
+        )
+        return
+    await _finish_registration(update, context, phone)
+
+
+async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.get("registration_step") != "phone":
+        return
+    await _finish_registration(update, context, update.message.contact.phone_number)
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    step = context.user_data.get("registration_step")
+    if step == "name":
+        await _handle_registration_name(update, context)
+        return
+    if step == "phone":
+        await _handle_registration_phone_text(update, context)
+        return
     if context.user_data.pop("awaiting_admin_id", False):
         await _handle_admin_id_reply(update, context)
         return
@@ -446,6 +566,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_remind_back(query, context)
     elif action == "remindtoggle":
         await _handle_remind_toggle(query, context, payload)
+    elif action == "approve_trainee":
+        await _handle_trainee_decision(query, context, payload, "approved")
+    elif action == "reject_trainee":
+        await _handle_trainee_decision(query, context, payload, "rejected")
+
+
+async def _handle_trainee_decision(query, context, payload: str, status: str) -> None:
+    if not _is_trainer_id(context, query.from_user.id):
+        return
+    user_id = int(payload)
+    db = _db(context)
+    trainee = db.get_trainee(user_id)
+    if trainee is None or trainee["status"] != "pending":
+        await query.edit_message_text("הבקשה לא נמצאה (ייתכן שכבר טופלה).")
+        return
+    db.set_trainee_status(user_id, status, decided_by=query.from_user.id)
+    _log(context, query.from_user, f"{status}_trainee", f"{trainee['full_name']} (ID: {user_id})")
+    decision_label = "אושרה ✅" if status == "approved" else "נדחתה ❌"
+    await query.edit_message_text(
+        f"בקשת ההרשמה של {trainee['full_name']} (ID: {user_id}) {decision_label} "
+        f"על ידי {_display_name(query.from_user)}."
+    )
+    try:
+        if status == "approved":
+            await context.bot.send_message(
+                user_id,
+                f"ההרשמה שלכם אושרה! 🎉\n\n{_TRAINEE_WELCOME}",
+                reply_markup=_main_keyboard(context, is_trainer=False),
+            )
+        else:
+            await context.bot.send_message(
+                user_id,
+                "לצערנו הבקשה שלכם נדחתה. אפשר לשלוח /start כדי לנסות שוב.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+    except TelegramError as exc:
+        logger.warning("Could not notify trainee %s of decision: %s", user_id, exc)
 
 
 def _recurring_conflict(db: Database, cfg: Config, slot, day: date, user_id: int) -> bool:
@@ -463,6 +620,12 @@ async def _handle_book(query, context, payload: str) -> None:
     slot_id_str, _, day_str = payload.partition("|")
     slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
     user = query.from_user
+
+    if not _is_trainer_id(context, user.id):
+        blocked = _trainee_gate_message(db, user.id)
+        if blocked:
+            await query.edit_message_text(blocked)
+            return
 
     slot = db.get_slot(slot_id)
     if slot is None:
@@ -516,6 +679,12 @@ async def _handle_waitlist_join(query, context, payload: str) -> None:
     slot_id_str, _, day_str = payload.partition("|")
     slot_id, day = int(slot_id_str), date.fromisoformat(day_str)
     user = query.from_user
+
+    if not _is_trainer_id(context, user.id):
+        blocked = _trainee_gate_message(db, user.id)
+        if blocked:
+            await query.edit_message_text(blocked)
+            return
 
     slot = db.get_slot(slot_id)
     if slot is None:
@@ -852,6 +1021,26 @@ async def webapp_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def trainees_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    _log(context, update.effective_user, "view_trainees")
+    cfg = _cfg(context)
+    if not (cfg.webapp_url and cfg.webapp_secret):
+        await update.message.reply_text(
+            "התכונה הזו זמינה רק כשהמיני-אפ מתארח עצמאית (WEBAPP_SECRET מוגדר). "
+            "ראו את 'Option B' ב-README."
+        )
+        return
+    separator = "&" if "?" in cfg.webapp_url else "?"
+    url = f"{cfg.webapp_url}{separator}view=users&token={quote(cfg.webapp_secret)}"
+    keyboard = [[InlineKeyboardButton("🌐 רשימת מתאמנים", url=url)]]
+    await update.message.reply_text(
+        "רשימת המתאמנים וההיסטוריה שלהם:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 # --- managing additional admins ---
 
 async def _do_add_admin(context: ContextTypes.DEFAULT_TYPE, requester, new_id: int) -> str:
@@ -943,6 +1132,31 @@ async def list_admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("מנהלים:\n" + "\n".join(lines))
 
 
+# --- trainee registration approval (viewed by the trainer/admins) ---
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    rows = _db(context).list_trainees(status="pending")
+    if not rows:
+        await update.message.reply_text("אין בקשות הרשמה ממתינות.")
+        return
+    for row in rows:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ אישור", callback_data=f"approve_trainee|{row['user_id']}"),
+                    InlineKeyboardButton("❌ דחייה", callback_data=f"reject_trainee|{row['user_id']}"),
+                ]
+            ]
+        )
+        await update.message.reply_text(
+            f"👤 {row['full_name']}\n📱 {row['phone']}\n🆔 {row['user_id']}\n"
+            f"נשלח: {row['requested_at']}",
+            reply_markup=keyboard,
+        )
+
+
 # --- audit log ---
 
 _ACTION_LABELS = {
@@ -963,6 +1177,10 @@ _ACTION_LABELS = {
     "view_webapplink": "בקשת קישור לעריכת המערכת",
     "view_admins": "צפייה ברשימת מנהלים",
     "open_add_admin_prompt": "פתיחת טופס הוספת מנהל",
+    "register": "הרשמה כמתאמן",
+    "approved_trainee": "אישור מתאמן",
+    "rejected_trainee": "דחיית מתאמן",
+    "view_trainees": "בקשת קישור למתאמנים",
 }
 
 
@@ -1017,6 +1235,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("addadmin", add_admin_command))
     app.add_handler(CommandHandler("deladmin", del_admin_command))
     app.add_handler(CommandHandler("auditlog", audit_log_command))
+    app.add_handler(CommandHandler("pending", pending_command))
+    app.add_handler(CommandHandler("trainees", trainees_command))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_web_app_data))
+    app.add_handler(MessageHandler(filters.CONTACT, on_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

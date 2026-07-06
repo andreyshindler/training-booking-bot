@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS trainees (
+    user_id INTEGER PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT,
+    decided_by INTEGER
+);
 """
 
 
@@ -503,4 +512,48 @@ class Database:
     def list_audit_log(self, limit: int = 50) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def list_audit_log_for_user(self, user_id: int, limit: int = 200) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM audit_log WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+
+    # --- trainee registration / approval ---
+
+    def register_trainee(self, user_id: int, full_name: str, phone: str) -> None:
+        """Create or resubmit a registration; always resets to 'pending'."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO trainees (user_id, full_name, phone, status, requested_at) "
+                "VALUES (?, ?, ?, 'pending', datetime('now')) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "full_name = excluded.full_name, phone = excluded.phone, "
+                "status = 'pending', requested_at = excluded.requested_at, "
+                "decided_at = NULL, decided_by = NULL",
+                (user_id, full_name, phone),
+            )
+
+    def get_trainee(self, user_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM trainees WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+    def set_trainee_status(self, user_id: int, status: str, decided_by: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE trainees SET status = ?, decided_at = datetime('now'), "
+                "decided_by = ? WHERE user_id = ?",
+                (status, decided_by, user_id),
+            )
+
+    def list_trainees(self, status: str | None = None) -> list[sqlite3.Row]:
+        if status is None:
+            return self.conn.execute(
+                "SELECT * FROM trainees ORDER BY requested_at DESC"
+            ).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM trainees WHERE status = ? ORDER BY requested_at DESC",
+            (status,),
         ).fetchall()

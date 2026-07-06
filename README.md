@@ -9,6 +9,11 @@ trainer's predefined weekly schedule.
   "Mon 10:00, 60 min", optionally with room for several participants) and can
   also add one-time (non-recurring) lessons for a specific date via the mini
   app's calendar.
+- **New trainees must register before they can book**: the first `/start`
+  asks for their full name, then their phone number (via Telegram's native
+  "share my phone" button, or typed). The request goes to the trainer (and
+  any admins) as an Approve/Reject message; booking is blocked until
+  approved. A rejected trainee can just send `/start` again to retry.
 - **Trainees** run `/book`, see the open slots for the next N days as buttons,
   and tap one to book it. A slot can hold as many participants as its
   capacity allows; once full, trainees can join a waiting list and are
@@ -48,6 +53,8 @@ Trainer only:
 | `/addadmin <id>` | Grant another Telegram user full admin access (same as tapping ➕ הוספת מנהל) |
 | `/deladmin <id>` | Revoke an admin added this way (the primary `TRAINER_ID` can't be removed) |
 | `/auditlog` | Sends the audit log as a `.txt` file (up to the last 1000 actions) — bookings, cancellations, schedule edits, admin changes — with who did what and when |
+| `/pending` | List trainee registrations awaiting approval, with Approve/Reject buttons (also sent automatically as they come in) |
+| `/trainees` | Link to a browser view of every trainee (name, phone, status) and, per trainee, their full history — self-hosted mini app only |
 
 Any additional admin has the exact same permissions as the primary trainer,
 including adding/removing other admins. Admins are stored in the database
@@ -109,6 +116,12 @@ involved, and nothing publicly reachable without the token.
    ```
    Since this reuses a path under a domain you already serve over HTTPS, no
    new DNS record or certificate is needed.
+
+Self-hosting also unlocks two extra read-only, server-rendered pages behind
+the same token (reachable via `/trainees`): `?view=users` lists every
+trainee (name, phone, status), and `?view=history&user_id=<id>` shows one
+trainee's full history — every booking, cancellation, and waitlist action,
+pulled from the audit log.
 
 Either way, once `WEBAPP_URL` is set the trainer's keyboard shows
 `⚙️ עריכת המערכת`, which opens the mini app pre-filled with the current
