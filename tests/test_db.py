@@ -239,9 +239,8 @@ def test_promote_next_waitlisted_books_earliest_in_line(db):
     db.join_waitlist(slot_id, day, 333, "Carol")
 
     db.cancel_booking(booking_id)
-    promotion = db.promote_next_waitlisted(slot_id, day)
-    assert promotion is not None
-    entry, new_booking_id = promotion
+    entry, new_booking_id, skipped = db.promote_next_waitlisted(slot_id, day)
+    assert entry is not None and skipped == []
     assert entry["user_name"] == "Bob"
     roster = db.bookings_for_slot(slot_id, day)
     assert [r["user_name"] for r in roster] == ["Bob"]
@@ -251,7 +250,7 @@ def test_promote_next_waitlisted_books_earliest_in_line(db):
 
 def test_promote_next_waitlisted_returns_none_when_empty(db):
     slot_id = db.add_slot(0, "10:00")
-    assert db.promote_next_waitlisted(slot_id, date(2026, 7, 6)) is None
+    assert db.promote_next_waitlisted(slot_id, date(2026, 7, 6)) == (None, None, [])
 
 
 def test_waitlist_for_user_and_prune_stale(db):
@@ -408,3 +407,79 @@ def test_list_audit_users_groups_and_uses_latest_name(db):
         (111, "Alice Cohen", 2),  # most recently active first
         (222, "Bob", 1),
     ]
+
+
+# --- session packages & quota ---
+
+
+def test_package_crud(db):
+    assert db.quota_enforced() is False
+    pkg5 = db.add_package(5, 250)
+    db.add_package(10, 450.5)
+    assert db.quota_enforced() is True
+    assert [(r["sessions"], r["price"]) for r in db.list_packages()] == [
+        (5, 250.0),
+        (10, 450.5),
+    ]
+    assert db.set_package_price(pkg5, 275) is True
+    assert db.get_package(pkg5)["price"] == 275.0
+    assert db.deactivate_package(pkg5) is True
+    assert db.deactivate_package(pkg5) is False  # already inactive
+    assert db.set_package_price(pkg5, 300) is False  # inactive
+    assert [r["sessions"] for r in db.list_packages()] == [10]
+
+
+def test_quota_ledger_balance(db):
+    assert db.quota_balance(111) == 0
+    db.add_quota(111, 5, "package", "1")
+    db.add_quota(111, -1, "booking", "17")
+    db.add_quota(111, 1, "cancel_refund", "17")
+    db.add_quota(222, 10, "package", "2")  # other user
+    assert db.quota_balance(111) == 5
+    assert db.quota_balance(222) == 10
+
+
+def test_package_request_lifecycle(db):
+    pkg = db.add_package(5, 250)
+    req = db.create_package_request(111, "Alice", pkg)
+    assert req is not None
+    # only one pending request per user
+    assert db.create_package_request(111, "Alice", pkg) is None
+    assert db.pending_package_request(111)["id"] == req
+    assert len(db.list_pending_package_requests()) == 1
+
+    row = db.decide_package_request(req, "approved", decided_by=1)
+    assert row["user_id"] == 111 and row["sessions"] == 5
+    assert db.quota_balance(111) == 5
+    assert db.pending_package_request(111) is None
+    # deciding again is a no-op
+    assert db.decide_package_request(req, "approved", decided_by=1) is None
+    assert db.quota_balance(111) == 5
+    # a new request is allowed after the previous was decided
+    assert db.create_package_request(111, "Alice", pkg) is not None
+
+
+def test_package_request_reject_gives_no_quota(db):
+    pkg = db.add_package(5, 250)
+    req = db.create_package_request(111, "Alice", pkg)
+    row = db.decide_package_request(req, "rejected", decided_by=1)
+    assert row is not None
+    assert db.quota_balance(111) == 0
+
+
+def test_promote_next_waitlisted_skips_users_without_quota(db):
+    db.add_package(5, 250)  # turns quota enforcement on
+    slot_id = db.add_slot(0, "10:00")  # capacity 1
+    day = date(2026, 7, 6)
+    db.add_quota(333, 2, "package", "x")  # only Carol has quota
+    booking_id = db.book(slot_id, day, 111, "Alice")
+    db.join_waitlist(slot_id, day, 222, "Bob")    # first in line, no quota
+    db.join_waitlist(slot_id, day, 333, "Carol")
+
+    db.cancel_booking(booking_id)
+    entry, new_booking_id, skipped = db.promote_next_waitlisted(
+        slot_id, day, require_quota=True
+    )
+    assert entry["user_name"] == "Carol" and new_booking_id is not None
+    assert [r["user_name"] for r in skipped] == ["Bob"]
+    assert db.waitlist_for_slot(slot_id, day) == []

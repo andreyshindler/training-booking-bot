@@ -62,6 +62,31 @@ CREATE TABLE IF NOT EXISTS trainees (
     decided_at TEXT,
     decided_by INTEGER
 );
+CREATE TABLE IF NOT EXISTS packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sessions INTEGER NOT NULL,
+    price REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS package_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    user_name TEXT NOT NULL,
+    package_id INTEGER NOT NULL REFERENCES packages(id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT,
+    decided_by INTEGER
+);
+CREATE TABLE IF NOT EXISTS quota_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    delta INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    ref TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -406,13 +431,19 @@ class Database:
             (user_id, from_day.isoformat()),
         ).fetchall()
 
-    def promote_next_waitlisted(self, slot_id: int, day: date) -> tuple[sqlite3.Row, int] | None:
+    def promote_next_waitlisted(
+        self, slot_id: int, day: date, require_quota: bool = False
+    ) -> tuple[sqlite3.Row | None, int | None, list[sqlite3.Row]]:
         """Pop the earliest waitlisted user for this session and book them.
 
-        Returns (waitlist_row, new_booking_id), or None if nobody was waiting.
+        Returns (waitlist_row, new_booking_id, skipped_rows). The promoted
+        pair is (None, None) if nobody bookable was waiting. With
+        ``require_quota``, entries whose quota balance is empty are removed
+        and returned in ``skipped_rows`` so the caller can notify them.
         If booking the next-in-line somehow fails (edge case), tries the one
         after them instead.
         """
+        skipped: list[sqlite3.Row] = []
         while True:
             entry = self.conn.execute(
                 "SELECT * FROM waitlist WHERE slot_id = ? AND date = ? "
@@ -420,14 +451,17 @@ class Database:
                 (slot_id, day.isoformat()),
             ).fetchone()
             if entry is None:
-                return None
+                return None, None, skipped
             with self.conn:
                 self.conn.execute("DELETE FROM waitlist WHERE id = ?", (entry["id"],))
+            if require_quota and self.quota_balance(entry["user_id"]) <= 0:
+                skipped.append(entry)
+                continue
             try:
                 booking_id = self.book(slot_id, day, entry["user_id"], entry["user_name"])
             except (SlotFullError, SlotTakenError):
                 continue
-            return entry, booking_id
+            return entry, booking_id, skipped
 
     def prune_stale_waitlist(self, today: date) -> None:
         with self.conn:
@@ -498,6 +532,124 @@ class Database:
 
     def list_admins(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM admins ORDER BY created_at").fetchall()
+
+    # --- session packages & quota ---
+
+    def add_package(self, sessions: int, price: float) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO packages (sessions, price) VALUES (?, ?)",
+                (sessions, price),
+            )
+        return cur.lastrowid
+
+    def set_package_price(self, package_id: int, price: float) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE packages SET price = ? WHERE id = ? AND active = 1",
+                (price, package_id),
+            )
+        return cur.rowcount > 0
+
+    def deactivate_package(self, package_id: int) -> bool:
+        """Packages are never deleted (requests reference them), only hidden."""
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE packages SET active = 0 WHERE id = ? AND active = 1",
+                (package_id,),
+            )
+        return cur.rowcount > 0
+
+    def list_packages(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM packages WHERE active = 1 ORDER BY sessions"
+        ).fetchall()
+
+    def get_package(self, package_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM packages WHERE id = ?", (package_id,)
+        ).fetchone()
+
+    def quota_enforced(self) -> bool:
+        """Quota rules apply only once the admin has configured packages."""
+        row = self.conn.execute(
+            "SELECT 1 FROM packages WHERE active = 1 LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def quota_balance(self, user_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(delta), 0) AS balance FROM quota_ledger "
+            "WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return row["balance"]
+
+    def add_quota(self, user_id: int, delta: int, reason: str, ref: str = "") -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO quota_ledger (user_id, delta, reason, ref) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, delta, reason, ref),
+            )
+
+    def pending_package_request(self, user_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT r.*, p.sessions, p.price FROM package_requests r "
+            "JOIN packages p ON p.id = r.package_id "
+            "WHERE r.user_id = ? AND r.status = 'pending' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+
+    def create_package_request(
+        self, user_id: int, user_name: str, package_id: int
+    ) -> int | None:
+        """One pending purchase request per user; returns None if one exists."""
+        if self.pending_package_request(user_id) is not None:
+            return None
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO package_requests (user_id, user_name, package_id) "
+                "VALUES (?, ?, ?)",
+                (user_id, user_name, package_id),
+            )
+        return cur.lastrowid
+
+    def get_package_request(self, request_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT r.*, p.sessions, p.price FROM package_requests r "
+            "JOIN packages p ON p.id = r.package_id WHERE r.id = ?",
+            (request_id,),
+        ).fetchone()
+
+    def list_pending_package_requests(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT r.*, p.sessions, p.price FROM package_requests r "
+            "JOIN packages p ON p.id = r.package_id "
+            "WHERE r.status = 'pending' ORDER BY r.created_at"
+        ).fetchall()
+
+    def decide_package_request(
+        self, request_id: int, status: str, decided_by: int
+    ) -> sqlite3.Row | None:
+        """Approve/reject a pending request; approval credits the quota.
+        Returns the request row, or None if it was already decided."""
+        row = self.get_package_request(request_id)
+        if row is None or row["status"] != "pending":
+            return None
+        with self.conn:
+            self.conn.execute(
+                "UPDATE package_requests SET status = ?, decided_at = datetime('now'), "
+                "decided_by = ? WHERE id = ?",
+                (status, decided_by, request_id),
+            )
+            if status == "approved":
+                self.conn.execute(
+                    "INSERT INTO quota_ledger (user_id, delta, reason, ref) "
+                    "VALUES (?, ?, 'package', ?)",
+                    (row["user_id"], row["sessions"], str(request_id)),
+                )
+        return row
 
     # --- audit log ---
 
