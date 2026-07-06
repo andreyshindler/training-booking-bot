@@ -1044,10 +1044,7 @@ async def trainees_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     separator = "&" if "?" in cfg.webapp_url else "?"
     url = f"{cfg.webapp_url}{separator}view=users&token={quote(cfg.webapp_secret)}"
     keyboard = [[InlineKeyboardButton("🌐 רשימת מתאמנים", url=url)]]
-    await update.message.reply_text(
-        "רשימת המתאמנים וההיסטוריה שלהם:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    await update.message.reply_text("👤", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # --- managing additional admins ---
