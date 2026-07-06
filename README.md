@@ -16,8 +16,10 @@ trainer's predefined weekly schedule.
   approved. A rejected trainee can just send `/start` again to retry.
 - **Trainees** run `/book`, see the open slots for the next N days as buttons,
   and tap one to book it. A slot can hold as many participants as its
-  capacity allows; once full, trainees can join a waiting list and are
-  automatically booked (with a notification) the moment someone cancels.
+  capacity allows; once full, trainees can join a waiting list. When someone
+  cancels, everyone on that session's waitlist is notified that a spot opened
+  with a one-tap register button — nobody is booked automatically, first to
+  tap wins.
   A trainee can hold only one active booking of a given recurring slot at a
   time — they can book the next week's occurrence only after the current
   one has ended.
@@ -54,12 +56,46 @@ Trainer only:
 | `/deladmin <id>` | Revoke an admin added this way (the primary `TRAINER_ID` can't be removed) |
 | `/auditlog` | Sends the audit log as a `.txt` file (up to the last 1000 actions) — bookings, cancellations, schedule edits, admin changes — with who did what and when |
 | `/userlog [id]` | **Super admin only** (`TRAINER_ID` from `.env`, not added admins). Per-user activity log as a `.txt` file. Without an id, shows a button list of everyone with activity (trainees and admins, 🛡 marks admins) — tap one to get that person's file |
+| `/packages` | List packages, management commands, and pending purchase requests with approve/reject buttons |
+| `/addpackage <sessions> <price>` | Add a package (turns quota enforcement on) |
+| `/setprice <id> <price>` | Change a package's price |
+| `/delpackage <id>` | Remove a package (existing balances are kept) |
+| `/addquota <user_id> <n>` | Manually credit (or debit, with a negative n) a user's session balance |
+| `/userpackages <user_id>` | Per-purchase usage report for one trainee (used/remaining per package instance) |
 | `/pending` | List trainee registrations awaiting approval, with Approve/Reject buttons (also sent automatically as they come in) |
 | `/trainees` | Link to a browser view of every trainee (name, phone, status) and, per trainee, their full history — self-hosted mini app only |
 
 Any additional admin has the exact same permissions as the primary trainer,
 including adding/removing other admins. Admins are stored in the database
 (not `.env`), so they can be managed live without restarting the bot.
+
+## Session packages & quota
+
+Trainees buy session packages; each booking spends one session from their
+balance.
+
+- The admin configures packages with `/addpackage <sessions> <price>` (e.g.
+  `/addpackage 5 250`), adjusts with `/setprice <id> <price>`, removes with
+  `/delpackage <id>`, and reviews everything (including pending purchase
+  requests, with approve/reject buttons) via `/packages`.
+- Trainees tap `🎫 חבילות ויתרה` to see their balance and the packages, and
+  request a purchase; every admin gets an approve/reject prompt. Approval
+  credits the sessions (payment itself happens outside the bot). One pending
+  request per user at a time.
+- Booking requires a positive balance and deducts one session; the remaining
+  balance is shown after each booking. Every approved purchase has a unique
+  id, each booking is attributed to a specific purchase (oldest with sessions
+  left, FIFO), and cancellations refund that same purchase — so
+  `/userpackages <user_id>` can always show exactly how much of each package
+  a trainee used (trainees see the same breakdown in their 🎫 view).
+- Cancelling is allowed up to **24 hours** before the session and restores
+  the session to the balance; closer than that, the trainee cannot cancel
+  (the admin still can from the roster view, which does refund).
+- `/addquota <user_id> <n>` lets an admin adjust a balance manually (also
+  negative). All of it is recorded in an auditable quota ledger.
+- **Quota is enforced only while at least one package is configured** — with
+  no packages, booking works with no balance requirement, so enabling the
+  feature is a deliberate admin action.
 
 ## Buttons instead of commands
 

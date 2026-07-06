@@ -34,6 +34,8 @@ from .scheduling import (
     REMINDER_OFFSETS,
     WEEKDAY_NAMES_HE,
     available_slots,
+    can_cancel_booking,
+    CANCEL_MIN_HOURS,
     has_unexpired_recurring_booking,
     hebrew_day_label,
     parse_time,
@@ -55,6 +57,7 @@ BTN_EDIT = "⚙️ עריכת המערכת"
 BTN_ADD_ADMIN = "➕ הוספת מנהל"
 BTN_PENDING = "⏳ בקשות ממתינות"
 BTN_TRAINEES = "👤 מתאמנים"
+BTN_PACKAGES = "🎫 חבילות ויתרה"
 
 # Telegram requires command names in Latin letters; the labels are Hebrew.
 TRAINEE_COMMANDS = [
@@ -74,6 +77,7 @@ TRAINER_COMMANDS = TRAINEE_COMMANDS + [
     BotCommand("auditlog", "יומן פעולות"),
     BotCommand("pending", "בקשות הרשמה ממתינות"),
     BotCommand("trainees", "רשימת מתאמנים (קישור לדפדפן)"),
+    BotCommand("packages", "הגדרת חבילות ובקשות רכישה"),
 ]
 # Commands reserved for the super admin (TRAINER_ID from .env) only.
 SUPER_ADMIN_COMMANDS = TRAINER_COMMANDS + [
@@ -213,6 +217,8 @@ def _webapp_edit_url(cfg: Config, db: Database) -> str:
 
 def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(BTN_BOOK), KeyboardButton(BTN_MY)]]
+    if not is_trainer:
+        rows.append([KeyboardButton(BTN_PACKAGES)])
     if is_trainer:
         rows.append([KeyboardButton(BTN_SCHEDULE), KeyboardButton(BTN_ALL)])
         rows.append([KeyboardButton(BTN_PENDING), KeyboardButton(BTN_TRAINEES)])
@@ -235,7 +241,8 @@ def _main_keyboard(context: ContextTypes.DEFAULT_TYPE, is_trainer: bool) -> Repl
 _TRAINEE_WELCOME = (
     "ברוכים הבאים! כאן מזמינים אימונים אצל המאמן.\n"
     f"{BTN_BOOK} — הצגת מועדים פנויים והזמנת אימון\n"
-    f"{BTN_MY} — האימונים הקרובים שלכם (עם אפשרות ביטול)"
+    f"{BTN_MY} — האימונים הקרובים שלכם (עם אפשרות ביטול)\n"
+    f"{BTN_PACKAGES} — יתרת האימונים שלכם ורכישת חבילות"
 )
 
 
@@ -498,6 +505,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await trainees_command(update, context)
     elif text == BTN_ADD_ADMIN:
         await add_admin_prompt(update, context)
+    elif text == BTN_PACKAGES:
+        await packages_view(update, context)
 
 
 # --- mini-app result (trainer saved the schedule in the web app) ---
@@ -596,6 +605,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _handle_trainee_decision(query, context, payload, "rejected")
     elif action == "userlog":
         await _handle_user_log(query, context, payload)
+    elif action == "pkgbuy":
+        await _handle_package_buy(query, context, payload)
+    elif action == "pkgapprove":
+        await _handle_package_decision(query, context, payload, "approved")
+    elif action == "pkgreject":
+        await _handle_package_decision(query, context, payload, "rejected")
 
 
 async def _handle_trainee_decision(query, context, payload: str, status: str) -> None:
@@ -667,6 +682,14 @@ async def _handle_book(query, context, payload: str) -> None:
         )
         return
 
+    quota_enforced = db.quota_enforced() and not _is_trainer_id(context, user.id)
+    if quota_enforced and db.quota_balance(user.id) <= 0:
+        await query.edit_message_text(
+            "אין לכם יתרת אימונים. אפשר לרכוש חבילה דרך הכפתור "
+            f"{BTN_PACKAGES} — לאחר אישור המאמן תוכלו להירשם."
+        )
+        return
+
     try:
         booking_id = db.book(slot_id, day, user.id, _display_name(user))
     except SlotFullError:
@@ -689,9 +712,18 @@ async def _handle_book(query, context, payload: str) -> None:
         await query.edit_message_text("כבר נרשמתם למועד הזה.")
         return
 
+    quota_note = ""
+    if quota_enforced:
+        purchase_id = db.consume_session(user.id, booking_id)
+        quota_note = f"\nנותרו לכם {db.quota_balance(user.id)} אימונים ביתרה."
+        if purchase_id is not None:
+            quota_note += f" (חבילה #{purchase_id})"
+    # if they were waiting for this exact session, the wait is over
+    db.leave_waitlist_for(slot_id, day, user.id)
+
     label = hebrew_day_label(day, slot["start_time"], slot["duration_min"])
     await query.edit_message_text(
-        f"✅ האימון נקבע: {label}\nנתראה באימון!\n\n"
+        f"✅ האימון נקבע: {label}\nנתראה באימון!{quota_note}\n\n"
         "אפשר להוסיף תזכורות (ניתן לבחור כמה, ולשנות בכל עת דרך "
         f"{BTN_MY}):",
         reply_markup=_reminder_keyboard(db, booking_id),
@@ -820,7 +852,7 @@ async def _handle_remind_toggle(query, context, payload: str) -> None:
 
 
 async def _handle_cancel(query, context, payload: str) -> None:
-    db = _db(context)
+    db, cfg = _db(context), _cfg(context)
     booking_id = int(payload)
     row = db.get_booking(booking_id)
     is_trainer = _is_trainer_id(context, query.from_user.id)
@@ -829,28 +861,61 @@ async def _handle_cancel(query, context, payload: str) -> None:
             "ההזמנה לא נמצאה (ייתכן שכבר בוטלה)."
         )
         return
+    now = datetime.now(cfg.timezone).replace(tzinfo=None)
+    if not is_trainer and not can_cancel_booking(row, now):
+        await query.edit_message_text(
+            f"לא ניתן לבטל את האימון {_fmt_booking(row)}: "
+            f"ביטול אפשרי עד {CANCEL_MIN_HOURS} שעות לפני תחילתו."
+        )
+        return
     db.cancel_booking(booking_id)
     label = _fmt_booking(row)
-    await query.edit_message_text(f"❌ האימון בוטל: {label}")
+    quota_enforced = db.quota_enforced()
+    refund_note = ""
+    if quota_enforced and not _is_trainer_id(context, row["user_id"]):
+        db.refund_session(row)
+        if row["user_id"] == query.from_user.id:
+            refund_note = (
+                f"\nהיתרה שלכם הוחזרה: {db.quota_balance(row['user_id'])} אימונים."
+            )
+    await query.edit_message_text(f"❌ האימון בוטל: {label}{refund_note}")
     _log(context, query.from_user, "cancel", label)
     if not is_trainer:
         await _notify_trainer(context, f"❌ בוטל אימון: {label} — {row['user_name']}")
 
-    promotion = db.promote_next_waitlisted(row["slot_id"], date.fromisoformat(row["date"]))
-    if promotion is not None:
-        promoted, promoted_booking_id = promotion
+    # A spot opened up: nobody is booked automatically — everyone on the
+    # waitlist is invited, first tap wins (the booking path re-checks
+    # capacity, quota, and the trainee gate).
+    day = date.fromisoformat(row["date"])
+    for entry in db.waitlist_for_slot(row["slot_id"], day):
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ הרשמה למועד",
+                        callback_data=f"book|{row['slot_id']}|{row['date']}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ הסרה מרשימת ההמתנה",
+                        callback_data=f"waitlistleave|{entry['id']}",
+                    )
+                ],
+            ]
+        )
         try:
             await context.bot.send_message(
-                promoted["user_id"],
-                f"🎉 התפנה מקום ונרשמתם אוטומטית לאימון: {label}\nנתראה באימון!\n\n"
-                "אפשר להוסיף תזכורות (ניתן לבחור כמה):",
-                reply_markup=_reminder_keyboard(db, promoted_booking_id),
+                entry["user_id"],
+                f"🔔 התפנה מקום באימון {label}!\n"
+                "ההרשמה על בסיס כל הקודם זוכה — לחצו כדי להירשם:",
+                reply_markup=keyboard,
             )
         except TelegramError as exc:
             logger.warning(
-                "Could not notify waitlisted user %s: %s", promoted["user_id"], exc
+                "Could not notify waitlisted user %s: %s", entry["user_id"], exc
             )
-        db.log_action(promoted["user_id"], promoted["user_name"], "waitlist_promoted", label)
+        db.log_action(entry["user_id"], entry["user_name"], "waitlist_spot_notified", label)
 
 
 def _session_keyboard(db: Database, rows) -> InlineKeyboardMarkup:
@@ -909,6 +974,273 @@ async def _handle_roster_back(query, context) -> None:
         "האימונים הקרובים — לחצו על מועד לצפייה במשתתפים ולביטול:",
         reply_markup=_session_keyboard(db, rows),
     )
+
+
+# --- session packages & quota ---
+
+def _fmt_price(price) -> str:
+    value = float(price)
+    return f"{int(value)}" if value.is_integer() else f"{value:g}"
+
+
+def _package_label(row) -> str:
+    return f"חבילת {row['sessions']} אימונים — {_fmt_price(row['price'])} ₪"
+
+
+def _purchase_line(p) -> str:
+    line = (
+        f"חבילה #{p['id']} ({p['sessions']} אימונים): "
+        f"נוצלו {p['used']}, נותרו {p['remaining']}"
+    )
+    if p["remaining"] <= 0:
+        line += " ✔️ נוצלה במלואה"
+    return line
+
+
+async def packages_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = _db(context)
+    user = update.effective_user
+    if not _is_trainer_id(context, user.id):
+        blocked = _trainee_gate_message(db, user.id)
+        if blocked:
+            await update.message.reply_text(blocked)
+            return
+    _log(context, user, "view_packages")
+    balance = db.quota_balance(user.id)
+    text = f"היתרה שלכם: {balance} אימונים"
+    purchases = db.purchases_for_user(user.id)
+    if purchases:
+        text += "\n\nהחבילות שלכם:"
+        for p in purchases:
+            text += f"\n{_purchase_line(p)}"
+    packages = db.list_packages()
+    keyboard = None
+    pending = db.pending_package_request(user.id)
+    if pending is not None:
+        text += f"\n\n⏳ בקשת רכישה ({_package_label(pending)}) ממתינה לאישור המאמן."
+    elif packages:
+        text += "\n\nחבילות לרכישה — לחצו כדי לשלוח בקשה למאמן:"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"🎫 {_package_label(row)}",
+                        callback_data=f"pkgbuy|{row['id']}",
+                    )
+                ]
+                for row in packages
+            ]
+        )
+    else:
+        text += "\n\nאין כרגע חבילות לרכישה."
+    await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def _handle_package_buy(query, context, payload: str) -> None:
+    db = _db(context)
+    user = query.from_user
+    if not _is_trainer_id(context, user.id):
+        blocked = _trainee_gate_message(db, user.id)
+        if blocked:
+            await query.edit_message_text(blocked)
+            return
+    package = db.get_package(int(payload)) if payload.isdigit() else None
+    if package is None or not package["active"]:
+        await query.edit_message_text("החבילה הזו כבר לא זמינה.")
+        return
+    request_id = db.create_package_request(user.id, _display_name(user), package["id"])
+    if request_id is None:
+        await query.edit_message_text("כבר יש לכם בקשת רכישה שממתינה לאישור.")
+        return
+    _log(context, user, "package_request", _package_label(package))
+    await query.edit_message_text(
+        f"🎫 הבקשה לרכישת {_package_label(package)} נשלחה למאמן. "
+        "תקבלו הודעה כשתאושר."
+    )
+    cfg = _cfg(context)
+    admin_ids = [cfg.trainer_id] + [row["user_id"] for row in db.list_admins()]
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ אישור", callback_data=f"pkgapprove|{request_id}"),
+                InlineKeyboardButton("❌ דחייה", callback_data=f"pkgreject|{request_id}"),
+            ]
+        ]
+    )
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"🎫 בקשת רכישה: {_display_name(user)} — {_package_label(package)}",
+                reply_markup=keyboard,
+            )
+        except TelegramError as exc:
+            logger.warning("Could not notify admin %s: %s", admin_id, exc)
+
+
+async def _handle_package_decision(query, context, payload: str, status: str) -> None:
+    if not _is_trainer_id(context, query.from_user.id):
+        return
+    db = _db(context)
+    if not payload.isdigit():
+        return
+    row = db.decide_package_request(int(payload), status, query.from_user.id)
+    if row is None:
+        await query.edit_message_text("הבקשה הזו כבר טופלה.")
+        return
+    label = _package_label(row)
+    if status == "approved":
+        balance = db.quota_balance(row["user_id"])
+        await query.edit_message_text(f"✅ אושרה: {label} — {row['user_name']}")
+        _log(context, query.from_user, "package_approve", f"{label} — {row['user_name']}")
+        user_text = f"✅ החבילה שלכם אושרה: {label}\nהיתרה שלכם כעת: {balance} אימונים."
+    else:
+        await query.edit_message_text(f"❌ נדחתה: {label} — {row['user_name']}")
+        _log(context, query.from_user, "package_reject", f"{label} — {row['user_name']}")
+        user_text = f"לצערנו בקשת הרכישה ({label}) נדחתה. לפרטים דברו עם המאמן."
+    try:
+        await context.bot.send_message(row["user_id"], user_text)
+    except TelegramError as exc:
+        logger.warning("Could not notify user %s: %s", row["user_id"], exc)
+
+
+async def packages_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    db = _db(context)
+    lines = ["חבילות פעילות:"]
+    packages = db.list_packages()
+    if packages:
+        lines += [f"#{row['id']} — {_package_label(row)}" for row in packages]
+    else:
+        lines.append("(אין — הרשמה לאימונים אינה דורשת יתרה כל עוד אין חבילות)")
+    lines += [
+        "",
+        "ניהול:",
+        "/addpackage <אימונים> <מחיר> — הוספת חבילה (למשל /addpackage 5 250)",
+        "/setprice <מספר> <מחיר> — עדכון מחיר",
+        "/delpackage <מספר> — הסרת חבילה",
+        "/addquota <מזהה משתמש> <כמות> — זיכוי/חיוב ידני",
+        "/userpackages <מזהה משתמש> — ניצול חבילות של מתאמן",
+    ]
+    pending = db.list_pending_package_requests()
+    await update.message.reply_text("\n".join(lines))
+    for row in pending:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ אישור", callback_data=f"pkgapprove|{row['id']}"),
+                    InlineKeyboardButton("❌ דחייה", callback_data=f"pkgreject|{row['id']}"),
+                ]
+            ]
+        )
+        await update.message.reply_text(
+            f"🎫 בקשה ממתינה: {row['user_name']} — {_package_label(row)}",
+            reply_markup=keyboard,
+        )
+
+
+async def add_package_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    usage = "שימוש: /addpackage <אימונים> <מחיר> — למשל /addpackage 5 250"
+    try:
+        sessions, price = int(context.args[0]), float(context.args[1])
+        if not 0 < sessions <= 200 or price < 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        await update.message.reply_text(usage)
+        return
+    package_id = _db(context).add_package(sessions, price)
+    _log(context, update.effective_user, "addpackage", f"{sessions} אימונים — {_fmt_price(price)} ₪")
+    await update.message.reply_text(
+        f"נוספה חבילה #{package_id}: {sessions} אימונים — {_fmt_price(price)} ₪\n"
+        "שימו לב: מרגע שמוגדרות חבילות, הרשמה לאימון דורשת יתרה."
+    )
+
+
+async def set_price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    usage = "שימוש: /setprice <מספר חבילה> <מחיר> (המספרים מופיעים ב-/packages)"
+    try:
+        package_id, price = int(context.args[0].lstrip("#")), float(context.args[1])
+        if price < 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        await update.message.reply_text(usage)
+        return
+    if _db(context).set_package_price(package_id, price):
+        _log(context, update.effective_user, "setprice", f"#{package_id} → {_fmt_price(price)} ₪")
+        await update.message.reply_text(f"המחיר של חבילה #{package_id} עודכן ל־{_fmt_price(price)} ₪.")
+    else:
+        await update.message.reply_text("אין חבילה פעילה עם המספר הזה. ראו /packages.")
+
+
+async def del_package_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text("שימוש: /delpackage <מספר חבילה> (ראו /packages)")
+        return
+    package_id = int(context.args[0].lstrip("#"))
+    if _db(context).deactivate_package(package_id):
+        _log(context, update.effective_user, "delpackage", f"#{package_id}")
+        await update.message.reply_text(
+            f"חבילה #{package_id} הוסרה. יתרות קיימות של מתאמנים נשמרות."
+        )
+    else:
+        await update.message.reply_text("אין חבילה פעילה עם המספר הזה. ראו /packages.")
+
+
+async def user_packages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: per-purchase usage report for one user — verifies a package was
+    fully used before selling the next one."""
+    if not _is_trainer(update, context):
+        return
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text("שימוש: /userpackages <מזהה משתמש>")
+        return
+    db = _db(context)
+    target_id = int(context.args[0].lstrip("#"))
+    _log(context, update.effective_user, "view_user_packages", f"ID: {target_id}")
+    purchases = db.purchases_for_user(target_id)
+    balance = db.quota_balance(target_id)
+    if not purchases:
+        await update.message.reply_text(
+            f"למשתמש {target_id} אין חבילות מאושרות. יתרה (מזיכויים ידניים): {balance}."
+        )
+        return
+    lines = [f"חבילות של {target_id} (יתרה כוללת: {balance}):"]
+    lines += [_purchase_line(p) for p in purchases]
+    await update.message.reply_text("\n".join(lines))
+
+
+async def add_quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_trainer(update, context):
+        return
+    usage = "שימוש: /addquota <מזהה משתמש> <כמות> — למשל /addquota 123456789 3 (או ‎-1 לחיוב)"
+    try:
+        target_id = int(context.args[0].lstrip("#"))
+        delta = int(context.args[1])
+        if delta == 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        await update.message.reply_text(usage)
+        return
+    db = _db(context)
+    db.add_quota(target_id, delta, "manual", f"by {update.effective_user.id}")
+    balance = db.quota_balance(target_id)
+    _log(context, update.effective_user, "add_quota", f"ID: {target_id}, {delta:+d}")
+    await update.message.reply_text(
+        f"עודכן. היתרה של {target_id} כעת: {balance} אימונים."
+    )
+    try:
+        await context.bot.send_message(
+            target_id, f"היתרה שלכם עודכנה על ידי המאמן. יתרה נוכחית: {balance} אימונים."
+        )
+    except TelegramError:
+        pass
 
 
 # --- trainer commands ---
@@ -1185,6 +1517,16 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 _ACTION_LABELS = {
     "view_user_log": "צפייה ביומן פעילות של משתמש",
+    "view_packages": "צפייה בחבילות וביתרה",
+    "package_request": "בקשת רכישת חבילה",
+    "package_approve": "אישור רכישת חבילה",
+    "package_reject": "דחיית רכישת חבילה",
+    "addpackage": "הוספת חבילה",
+    "delpackage": "הסרת חבילה",
+    "setprice": "עדכון מחיר חבילה",
+    "add_quota": "עדכון יתרה ידני",
+    "view_user_packages": "צפייה בניצול חבילות של מתאמן",
+    "waitlist_spot_notified": "התראה על מקום שהתפנה",
     "book": "הזמנת אימון",
     "cancel": "ביטול אימון",
     "waitlist_join": "הצטרפות לרשימת המתנה",
@@ -1340,6 +1682,12 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("deladmin", del_admin_command))
     app.add_handler(CommandHandler("auditlog", audit_log_command))
     app.add_handler(CommandHandler("userlog", user_log_command))
+    app.add_handler(CommandHandler("packages", packages_admin_command))
+    app.add_handler(CommandHandler("addpackage", add_package_command))
+    app.add_handler(CommandHandler("setprice", set_price_command))
+    app.add_handler(CommandHandler("delpackage", del_package_command))
+    app.add_handler(CommandHandler("addquota", add_quota_command))
+    app.add_handler(CommandHandler("userpackages", user_packages_command))
     app.add_handler(CommandHandler("pending", pending_command))
     app.add_handler(CommandHandler("trainees", trainees_command))
     app.add_handler(CallbackQueryHandler(on_callback))

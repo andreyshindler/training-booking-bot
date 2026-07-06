@@ -174,3 +174,17 @@ def test_is_reminder_due_false_after_session_started():
     # bot was down and only came back after the session already began; skip it
     reminder = _reminder("2026-07-06", "10:00", 60)
     assert is_reminder_due(reminder, datetime(2026, 7, 6, 10, 0)) is False
+
+
+def test_can_cancel_booking_window():
+    from bot.scheduling import can_cancel_booking
+
+    booking = {"date": "2026-07-07", "start_time": "10:00"}
+    # exactly 24h before → still allowed
+    assert can_cancel_booking(booking, datetime(2026, 7, 6, 10, 0)) is True
+    # one minute inside the window → refused
+    assert can_cancel_booking(booking, datetime(2026, 7, 6, 10, 1)) is False
+    # long before → allowed
+    assert can_cancel_booking(booking, datetime(2026, 7, 1, 9, 0)) is True
+    # after the session started → refused
+    assert can_cancel_booking(booking, datetime(2026, 7, 7, 11, 0)) is False

@@ -60,6 +60,18 @@ def slot_end_dt(row) -> datetime:
     return combine_day_time(day, row["start_time"]) + timedelta(minutes=row["duration_min"])
 
 
+# Trainees may cancel a booking only up to this many hours before it starts;
+# cancelling in time restores their session quota.
+CANCEL_MIN_HOURS = 24
+
+
+def can_cancel_booking(row, now: datetime, min_hours: int = CANCEL_MIN_HOURS) -> bool:
+    """``row`` needs date/start_time keys. True while the session start is at
+    least ``min_hours`` away."""
+    start_dt = combine_day_time(date.fromisoformat(row["date"]), row["start_time"])
+    return start_dt - now >= timedelta(hours=min_hours)
+
+
 def has_unexpired_recurring_booking(existing_bookings, target_day: date, now: datetime) -> bool:
     """True if any of ``existing_bookings`` (rows with date/start_time/duration_min,
     all for the same recurring slot) is for a date other than ``target_day`` and
