@@ -195,7 +195,11 @@ def mini_app_payload(cfg: Config, db: Database) -> dict:
         }
         for row in db.list_one_time_slots(from_day, to_day)
     ]
-    return {"recurring": recurring, "one_time": one_time}
+    packages = [
+        {"id": row["id"], "sessions": row["sessions"], "price": row["price"]}
+        for row in db.list_packages()
+    ]
+    return {"recurring": recurring, "one_time": one_time, "packages": packages}
 
 
 def _webapp_edit_url(cfg: Config, db: Database) -> str:
@@ -541,6 +545,24 @@ async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             day_iso = date.fromisoformat(str(slot["date"])).isoformat()
             start_time, duration, capacity = _parse_slot_fields(slot)
             desired_one_time.append((day_iso, start_time, duration, capacity))
+
+        # Older cached pages don't send "packages" — leave the catalog alone then.
+        desired_packages = None
+        if "packages" in data:
+            desired_packages = []
+            for item in data["packages"]:
+                sessions = int(item["sessions"])
+                price = float(item["price"])
+                if not 0 < sessions <= 200 or price < 0:
+                    raise ValueError(f"bad package: {sessions} / {price}")
+                package_id = item.get("id")
+                desired_packages.append(
+                    {
+                        "id": int(package_id) if package_id is not None else None,
+                        "sessions": sessions,
+                        "price": price,
+                    }
+                )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Bad web app data: %s", exc)
         await update.effective_message.reply_text(
@@ -567,6 +589,18 @@ async def on_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "schedule_edit",
         f"נוספו {total_added}, נמחקו {total_removed}, שונו {total_updated}",
     )
+    if desired_packages is not None:
+        pkg_added, pkg_removed, pkg_updated = db.sync_packages(desired_packages)
+        if pkg_added or pkg_removed or pkg_updated:
+            summary += (
+                f"\n🎫 חבילות: נוספו {pkg_added}, הוסרו {pkg_removed}, "
+                f"שונו {pkg_updated}."
+            )
+            _log(
+                context, update.effective_user,
+                "packages_edit",
+                f"נוספו {pkg_added}, הוסרו {pkg_removed}, שונו {pkg_updated}",
+            )
     # Refresh the keyboard so the edit button carries the new schedule.
     await update.effective_message.reply_text(
         summary, reply_markup=_main_keyboard(context, is_trainer=True)
@@ -1116,7 +1150,9 @@ async def packages_admin_command(update: Update, context: ContextTypes.DEFAULT_T
         lines.append("(אין — הרשמה לאימונים אינה דורשת יתרה כל עוד אין חבילות)")
     lines += [
         "",
-        "ניהול:",
+        f"ניהול נוח: דרך {BTN_EDIT} (מיני-אפ) — הוספה, שינוי מחיר ומחיקה.",
+        "",
+        "או בפקודות:",
         "/addpackage <אימונים> <מחיר> — הוספת חבילה (למשל /addpackage 5 250)",
         "/setprice <מספר> <מחיר> — עדכון מחיר",
         "/delpackage <מספר> — הסרת חבילה",
@@ -1526,6 +1562,7 @@ _ACTION_LABELS = {
     "setprice": "עדכון מחיר חבילה",
     "add_quota": "עדכון יתרה ידני",
     "view_user_packages": "צפייה בניצול חבילות של מתאמן",
+    "packages_edit": "עריכת חבילות במיני-אפ",
     "waitlist_spot_notified": "התראה על מקום שהתפנה",
     "book": "הזמנת אימון",
     "cancel": "ביטול אימון",

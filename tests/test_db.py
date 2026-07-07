@@ -492,3 +492,29 @@ def test_consume_session_without_purchase_uses_manual_credit(db):
     assert db.consume_session(111, booking_id) is None
     assert db.quota_balance(111) == 0
     assert db.get_booking(booking_id)["purchase_id"] is None
+
+
+def test_sync_packages_add_update_remove(db):
+    keep = db.add_package(5, 250)
+    drop = db.add_package(10, 450)
+    added, removed, updated = db.sync_packages(
+        [
+            {"id": keep, "sessions": 5, "price": 275},   # price change
+            {"id": None, "sessions": 20, "price": 800},  # new
+        ]
+    )
+    assert (added, removed, updated) == (1, 1, 1)
+    rows = {(r["sessions"], r["price"]) for r in db.list_packages()}
+    assert rows == {(5, 275.0), (20, 800.0)}
+    # the dropped package is deactivated, not deleted (purchases keep referencing it)
+    assert db.get_package(drop)["active"] == 0
+
+
+def test_sync_packages_ignores_unknown_ids(db):
+    db.add_package(5, 250)
+    added, removed, updated = db.sync_packages(
+        [{"id": 999, "sessions": 7, "price": 1}]
+    )
+    # unknown id is not recreated; the real package is deactivated (missing from desired)
+    assert (added, removed, updated) == (0, 1, 0)
+    assert db.list_packages() == []
