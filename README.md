@@ -74,10 +74,12 @@ including adding/removing other admins. Admins are stored in the database
 Trainees buy session packages; each booking spends one session from their
 balance.
 
-- The admin configures packages with `/addpackage <sessions> <price>` (e.g.
-  `/addpackage 5 250`), adjusts with `/setprice <id> <price>`, removes with
-  `/delpackage <id>`, and reviews everything (including pending purchase
-  requests, with approve/reject buttons) via `/packages`.
+- The admin manages packages in the **mini app** (`⚙️ עריכת המערכת`): a
+  🎫 section lists the packages with inline price editing, tap-to-delete,
+  and an add form — saved together with the schedule. The equivalent
+  commands also work: `/addpackage <sessions> <price>`,
+  `/setprice <id> <price>`, `/delpackage <id>`, and `/packages` shows the
+  catalog plus pending purchase requests with approve/reject buttons.
 - Trainees tap `🎫 חבילות ויתרה` to see their balance and the packages, and
   request a purchase; every admin gets an approve/reject prompt. Approval
   credits the sessions (payment itself happens outside the bot). One pending

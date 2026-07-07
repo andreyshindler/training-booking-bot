@@ -559,6 +559,38 @@ class Database:
             "SELECT * FROM packages WHERE id = ?", (package_id,)
         ).fetchone()
 
+    def sync_packages(self, desired) -> tuple[int, int, int]:
+        """Make the active package catalog match ``desired`` (mini-app save).
+
+        Each item is a mapping with sessions/price and optionally id. Items
+        with a known id keep their identity (price updated in place); items
+        without an id are created; active packages missing from ``desired``
+        are deactivated (existing purchases and balances are untouched).
+        Returns (added, removed, updated).
+        """
+        existing = {row["id"]: row for row in self.list_packages()}
+        added = removed = updated = 0
+        seen: set[int] = set()
+        for item in desired:
+            package_id = item.get("id")
+            sessions = int(item["sessions"])
+            price = float(item["price"])
+            if package_id is not None and int(package_id) in existing:
+                package_id = int(package_id)
+                seen.add(package_id)
+                if existing[package_id]["price"] != price:
+                    self.set_package_price(package_id, price)
+                    updated += 1
+            elif package_id is None:
+                self.add_package(sessions, price)
+                added += 1
+            # an id we don't know (stale page) is ignored rather than recreated
+        for package_id in existing:
+            if package_id not in seen:
+                self.deactivate_package(package_id)
+                removed += 1
+        return added, removed, updated
+
     def quota_enforced(self) -> bool:
         """Quota rules apply only once the admin has configured packages."""
         row = self.conn.execute(

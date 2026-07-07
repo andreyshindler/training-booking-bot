@@ -156,6 +156,27 @@
     <div class="error" id="err"></div>
   </div>
 
+  <div class="add-card">
+    <div class="title">🎫 חבילות אימונים</div>
+    <p class="hint" style="margin-bottom:10px">
+      כשמוגדרות חבילות, הרשמה לאימון דורשת יתרה. אפשר לשנות מחיר במקום;
+      מחיקת חבילה לא פוגעת ביתרות קיימות.
+    </p>
+    <div id="pkgList"></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field">
+        <label for="pkgSessions">מספר אימונים</label>
+        <input id="pkgSessions" type="number" value="5" min="1" max="200" step="1">
+      </div>
+      <div class="field">
+        <label for="pkgPrice">מחיר (₪)</label>
+        <input id="pkgPrice" type="number" value="250" min="0" step="1">
+      </div>
+    </div>
+    <button class="add-btn" onclick="addPackage()">+ הוספת חבילה</button>
+    <div class="error" id="pkgErr"></div>
+  </div>
+
   <button id="saveBtn" onclick="save()">💾 שמירת המערכת</button>
 
 <script>
@@ -168,6 +189,7 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   let recurringSlots = [];
   let oneTimeSlots = [];
+  let packages = [];
   try {
     // Self-hosted (bot/webapp_server.py): the schedule is injected directly
     // into the page per-request, so the URL only needs a short token.
@@ -187,6 +209,11 @@
         start_time: String(s.start_time),
         duration_min: Number(s.duration_min) || 60,
         capacity: Number(s.capacity) || 1,
+      }));
+      packages = (parsed.packages || []).map(p => ({
+        id: p.id != null ? Number(p.id) : null,
+        sessions: Number(p.sessions),
+        price: Number(p.price),
       }));
     }
   } catch (e) { /* start empty on bad input */ }
@@ -350,8 +377,60 @@
     render();
   }
 
+  function renderPackages() {
+    const list = document.getElementById("pkgList");
+    list.innerHTML = "";
+    if (!packages.length) {
+      const empty = document.createElement("div");
+      empty.className = "day-empty";
+      empty.style.textAlign = "right";
+      empty.textContent = "אין חבילות — הרשמה לאימונים אינה דורשת יתרה.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const p of packages) {
+      const row = document.createElement("div");
+      row.className = "chip";
+      row.style.cssText = "font-size:0.95rem; padding:8px 10px; margin-bottom:6px;";
+      const label = document.createElement("span");
+      label.textContent = `חבילת ${p.sessions} אימונים`;
+      const price = document.createElement("input");
+      price.type = "number"; price.min = "0"; price.step = "1";
+      price.value = p.price;
+      price.style.cssText = "width:90px; height:34px; padding:4px 8px;";
+      price.setAttribute("aria-label", "מחיר בשקלים");
+      price.onchange = () => {
+        const v = Number(price.value);
+        if (v >= 0) p.price = v; else price.value = p.price;
+      };
+      const currency = document.createElement("span");
+      currency.textContent = "₪";
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.setAttribute("aria-label", "מחיקת חבילה");
+      del.onclick = () => { packages = packages.filter(x => x !== p); renderPackages(); };
+      row.append(label, price, currency, del);
+      list.appendChild(row);
+    }
+  }
+
+  function addPackage() {
+    const err = document.getElementById("pkgErr");
+    err.textContent = "";
+    const sessions = Number(document.getElementById("pkgSessions").value);
+    const price = Number(document.getElementById("pkgPrice").value);
+    if (!(sessions >= 1 && sessions <= 200)) { err.textContent = "מספר אימונים: 1 עד 200."; return; }
+    if (!(price >= 0)) { err.textContent = "מחיר לא תקין."; return; }
+    packages.push({ id: null, sessions: sessions, price: price });
+    renderPackages();
+  }
+
   function save() {
-    const payload = JSON.stringify({ recurring: recurringSlots, one_time: oneTimeSlots });
+    const payload = JSON.stringify({
+      recurring: recurringSlots,
+      one_time: oneTimeSlots,
+      packages: packages,
+    });
     if (tg) {
       tg.sendData(payload); // Telegram closes the mini app automatically
     } else {
@@ -369,6 +448,7 @@
   }
 
   render();
+  renderPackages();
 
   if (tg) {
     tg.ready();
