@@ -1,6 +1,7 @@
 """Entry point: python -m bot.main"""
 
 import logging
+from datetime import datetime
 
 from telegram.ext import ApplicationBuilder
 
@@ -8,6 +9,7 @@ from .config import load_config
 from .db import Database
 from .handlers import CFG, DB, mini_app_payload, register_handlers, setup_commands_menu
 from .reminders import send_due_reminders
+from .scheduling import shape_session_log
 from .webapp_server import start_webapp_server
 
 logging.basicConfig(
@@ -58,8 +60,25 @@ def main() -> None:
             finally:
                 webapp_db.close()
 
+        def get_trainee_sessions(user_id_str):
+            webapp_db = Database(cfg.db_path)
+            try:
+                if not user_id_str.isdigit():
+                    return None, []
+                user_id = int(user_id_str)
+                trainee = webapp_db.get_trainee(user_id)
+                if trainee is None:
+                    return None, []
+                now = datetime.now(cfg.timezone).replace(tzinfo=None)
+                return trainee, shape_session_log(
+                    webapp_db.sessions_for_user(user_id), now
+                )
+            finally:
+                webapp_db.close()
+
         start_webapp_server(
-            cfg.webapp_secret, cfg.webapp_port, get_payload, list_trainees, get_trainee_history
+            cfg.webapp_secret, cfg.webapp_port, get_payload, list_trainees,
+            get_trainee_history, get_trainee_sessions,
         )
     if app.job_queue is not None:
         app.job_queue.run_repeating(send_due_reminders, interval=60, first=10)

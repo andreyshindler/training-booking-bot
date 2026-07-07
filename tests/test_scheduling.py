@@ -188,3 +188,19 @@ def test_can_cancel_booking_window():
     assert can_cancel_booking(booking, datetime(2026, 7, 1, 9, 0)) is True
     # after the session started → refused
     assert can_cancel_booking(booking, datetime(2026, 7, 7, 11, 0)) is False
+
+
+def test_shape_session_log_status_package_and_weekday():
+    from bot.scheduling import shape_session_log
+
+    rows = [
+        {"date": "2026-07-06", "start_time": "10:00", "duration_min": 60,
+         "purchase_id": 3, "created_at": "2026-07-01 09:00:00"},
+        {"date": "2026-07-13", "start_time": "10:00", "duration_min": 60,
+         "purchase_id": None, "created_at": "2026-07-01 09:05:00"},
+    ]
+    now = datetime(2026, 7, 8, 12, 0)
+    shaped = shape_session_log(rows, now)
+    assert shaped[0]["status"] == "התקיים" and shaped[0]["package"] == "חבילה #3"
+    assert shaped[0]["weekday"] == "יום שני" and shaped[0]["date"] == "06/07/2026"
+    assert shaped[1]["status"] == "רשום" and shaped[1]["package"] == "—"

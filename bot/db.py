@@ -358,6 +358,19 @@ class Database:
             )
         return cur.rowcount > 0
 
+    def sessions_for_user(self, user_id: int) -> list[sqlite3.Row]:
+        """The user's full session log, newest first: every current booking —
+        upcoming registrations and already-held sessions — with the package
+        (purchase) each one consumed. Cancelled bookings are not included."""
+        return self.conn.execute(
+            "SELECT b.id, b.date, b.created_at, b.purchase_id, "
+            "       s.start_time, s.duration_min "
+            "FROM bookings b JOIN slots s ON s.id = b.slot_id "
+            "WHERE b.user_id = ? "
+            "ORDER BY b.date DESC, s.start_time DESC",
+            (user_id,),
+        ).fetchall()
+
     def bookings_for_user(self, user_id: int, from_day: date) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT b.*, s.start_time, s.duration_min FROM bookings b "

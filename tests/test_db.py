@@ -518,3 +518,23 @@ def test_sync_packages_ignores_unknown_ids(db):
     # unknown id is not recreated; the real package is deactivated (missing from desired)
     assert (added, removed, updated) == (0, 1, 0)
     assert db.list_packages() == []
+
+
+def test_sessions_for_user_newest_first_with_purchase(db):
+    slot_id = db.add_slot(0, "10:00", 60, capacity=5)
+    b1 = db.book(slot_id, date(2026, 7, 6), 111, "Alice")
+    b2 = db.book(slot_id, date(2026, 7, 13), 111, "Alice")
+    db.book(slot_id, date(2026, 7, 6), 222, "Bob")  # other user, excluded
+    pkg = db.add_package(5, 250)
+    req = db.create_package_request(111, "Alice", pkg)
+    db.decide_package_request(req, "approved", decided_by=1)
+    db.consume_session(111, b2)
+    cancelled = db.book(slot_id, date(2026, 7, 20), 111, "Alice")
+    db.cancel_booking(cancelled)  # cancelled bookings drop out of the log
+
+    rows = db.sessions_for_user(111)
+    assert [(r["date"], r["purchase_id"]) for r in rows] == [
+        ("2026-07-13", req),
+        ("2026-07-06", None),
+    ]
+    assert rows[0]["start_time"] == "10:00" and rows[0]["duration_min"] == 60

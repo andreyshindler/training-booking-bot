@@ -36,7 +36,21 @@ def server(payload, trainees, history):
             return trainees[0], history
         return None, []
 
-    srv = start_webapp_server("s3cr3t", 0, lambda: payload, lambda: trainees, get_trainee_history)
+    def get_trainee_sessions(user_id_str):
+        if user_id_str == "111":
+            return trainees[0], [
+                {
+                    "date": "06/07/2026", "weekday": "יום שני", "start_time": "10:00",
+                    "duration_min": 60, "package": "חבילה #3", "status": "התקיים",
+                    "booked_at": "2026-07-01 09:00:00",
+                }
+            ]
+        return None, []
+
+    srv = start_webapp_server(
+        "s3cr3t", 0, lambda: payload, lambda: trainees, get_trainee_history,
+        get_trainee_sessions,
+    )
     yield srv
     srv.shutdown()
     srv.server_close()
@@ -118,3 +132,22 @@ def test_view_history_for_unknown_user(server):
     status, body = _get(server, token="s3cr3t", extra="view=history&user_id=999")
     assert status == 200
     assert "לא נמצא".encode("utf-8") in body
+
+
+def test_sessions_view_lists_only_sessions_with_package(server):
+    status, body = _get(server, token="s3cr3t", extra="view=sessions&user_id=111")
+    text = body.decode("utf-8")
+    assert status == 200
+    assert "חבילה #3" in text and "התקיים" in text and "10:00" in text
+    # audit-style actions do not belong in this view
+    assert "Monday 10:00" not in text
+
+
+def test_sessions_view_unknown_user(server):
+    status, body = _get(server, token="s3cr3t", extra="view=sessions&user_id=999")
+    assert status == 200 and "לא נמצא מתאמן".encode() in body
+
+
+def test_users_view_links_to_sessions(server):
+    status, body = _get(server, token="s3cr3t", extra="view=users")
+    assert status == 200 and b"view=sessions" in body
