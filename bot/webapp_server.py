@@ -55,12 +55,13 @@ def _render_users_view(trainees: list[dict], token: str) -> bytes:
         f"<td>{escape(str(t['status']))}</td>"
         f"<td>{escape(str(t['requested_at']))}</td>"
         f'<td><a href="?view=history&user_id={t["user_id"]}&token={quote(token)}">היסטוריה</a></td>'
+        f'<td><a href="?view=sessions&user_id={t["user_id"]}&token={quote(token)}">יומן אימונים</a></td>'
         "</tr>"
         for t in trainees
     )
     body = (
         "<table><tr><th>שם</th><th>טלפון</th><th>סטטוס</th>"
-        f"<th>נרשם</th><th></th></tr>{rows}</table>"
+        f"<th>נרשם</th><th></th><th></th></tr>{rows}</table>"
     )
     return _page("מתאמנים", body)
 
@@ -89,7 +90,40 @@ def _render_history_view(trainee: dict | None, history: list[dict], user_id: str
     return _page("היסטוריית מתאמן", profile + table)
 
 
-def _make_handler(secret: str, template: str, get_payload, list_trainees, get_trainee_history):
+def _render_sessions_view(trainee: dict | None, sessions: list[dict], user_id: str) -> bytes:
+    """Only the trainee's sessions — upcoming registrations and held sessions —
+    with the package each one consumed (unlike the full audit history)."""
+    if trainee is None:
+        return _page("יומן אימונים", f"<p>לא נמצא מתאמן עם המזהה {escape(user_id)}.</p>")
+    profile = (
+        f"<p><b>שם:</b> {escape(str(trainee['full_name']))}<br>"
+        f"<b>מזהה:</b> {escape(str(trainee['user_id']))}</p>"
+    )
+    if not sessions:
+        table = "<p>אין אימונים רשומים.</p>"
+    else:
+        rows = "".join(
+            "<tr>"
+            f"<td>{escape(str(s['weekday']))} {escape(str(s['date']))}</td>"
+            f"<td>{escape(str(s['start_time']))}</td>"
+            f"<td>{escape(str(s['duration_min']))} דק'</td>"
+            f"<td>{escape(str(s['package']))}</td>"
+            f"<td>{escape(str(s['status']))}</td>"
+            f"<td>{escape(str(s['booked_at']))}</td>"
+            "</tr>"
+            for s in sessions
+        )
+        table = (
+            "<table><tr><th>תאריך</th><th>שעה</th><th>משך</th>"
+            f"<th>חבילה</th><th>סטטוס</th><th>נרשם ב־</th></tr>{rows}</table>"
+        )
+    return _page("יומן אימונים", profile + table)
+
+
+def _make_handler(
+    secret: str, template: str, get_payload, list_trainees, get_trainee_history,
+    get_trainee_sessions,
+):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             # The query string carries the secret token; never log it
@@ -108,6 +142,10 @@ def _make_handler(secret: str, template: str, get_payload, list_trainees, get_tr
                 user_id_str = query.get("user_id", [""])[0]
                 trainee, history = get_trainee_history(user_id_str)
                 return _render_history_view(trainee, history, user_id_str)
+            if view == "sessions":
+                user_id_str = query.get("user_id", [""])[0]
+                trainee, sessions = get_trainee_sessions(user_id_str)
+                return _render_sessions_view(trainee, sessions, user_id_str)
             data_script = f"<script>window.__MINI_APP_DATA__ = {json.dumps(get_payload())};</script>"
             html = template.replace(_INJECT_AFTER, _INJECT_AFTER + data_script, 1)
             return html.encode("utf-8")
@@ -140,21 +178,27 @@ def _make_handler(secret: str, template: str, get_payload, list_trainees, get_tr
 
 
 def start_webapp_server(
-    secret: str, port: int, get_payload, list_trainees, get_trainee_history
+    secret: str, port: int, get_payload, list_trainees, get_trainee_history,
+    get_trainee_sessions,
 ) -> ThreadingHTTPServer:
     """Start serving the mini app (and admin reporting views) on ``port`` in
     a background thread.
 
-    All three callables are invoked fresh on every authorized request (no
-    args except where noted) so every view always reflects live data, not a
+    All callables are invoked fresh on every authorized request (no args
+    except where noted) so every view always reflects live data, not a
     snapshot baked into the URL:
     - ``get_payload()`` -> the schedule dict for the calendar mini app.
     - ``list_trainees()`` -> list of trainee dict rows, for ``?view=users``.
     - ``get_trainee_history(user_id_str)`` -> (trainee dict or None, list of
       audit-log dict rows), for ``?view=history&user_id=...``.
+    - ``get_trainee_sessions(user_id_str)`` -> (trainee dict or None, list of
+      display-ready session dicts), for ``?view=sessions&user_id=...``.
     """
     template = _MINI_APP_PATH.read_text(encoding="utf-8")
-    handler = _make_handler(secret, template, get_payload, list_trainees, get_trainee_history)
+    handler = _make_handler(
+        secret, template, get_payload, list_trainees, get_trainee_history,
+        get_trainee_sessions,
+    )
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

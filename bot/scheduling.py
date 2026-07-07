@@ -97,6 +97,33 @@ def is_reminder_due(row, now: datetime) -> bool:
     return trigger_at <= now < start_dt
 
 
+def shape_session_log(rows, now: datetime) -> list[dict]:
+    """Turn raw booking rows (date/start_time/duration_min/purchase_id/
+    created_at) into display-ready entries for the per-trainee sessions view:
+    Hebrew weekday, the package that paid for the session, and whether the
+    session already took place (התקיים) or is still upcoming (רשום)."""
+    shaped = []
+    for row in rows:
+        day = date.fromisoformat(row["date"])
+        start = combine_day_time(day, row["start_time"])
+        shaped.append(
+            {
+                "date": day.strftime("%d/%m/%Y"),
+                "weekday": f"יום {WEEKDAY_NAMES_HE[day.weekday()]}",
+                "start_time": row["start_time"],
+                "duration_min": row["duration_min"],
+                "package": (
+                    f"חבילה #{row['purchase_id']}"
+                    if row["purchase_id"] is not None
+                    else "—"
+                ),
+                "status": "התקיים" if start <= now else "רשום",
+                "booked_at": row["created_at"],
+            }
+        )
+    return shaped
+
+
 def hebrew_day_label(
     day: date, start_time: str, duration_min: int, capacity: int = 1, booked_count: int = 0
 ) -> str:

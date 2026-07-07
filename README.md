@@ -157,11 +157,13 @@ involved, and nothing publicly reachable without the token.
    Since this reuses a path under a domain you already serve over HTTPS, no
    new DNS record or certificate is needed.
 
-Self-hosting also unlocks two extra read-only, server-rendered pages behind
+Self-hosting also unlocks extra read-only, server-rendered pages behind
 the same token (reachable via `/trainees`): `?view=users` lists every
-trainee (name, phone, status), and `?view=history&user_id=<id>` shows one
+trainee (name, phone, status); `?view=history&user_id=<id>` shows one
 trainee's full history — every booking, cancellation, and waitlist action,
-pulled from the audit log.
+pulled from the audit log; and `?view=sessions&user_id=<id>` is the clean
+per-trainee sessions log — only the sessions they registered for or
+attended (התקיים/רשום), each with the package that paid for it.
 
 Either way, once `WEBAPP_URL` is set the trainer's keyboard shows
 `⚙️ עריכת המערכת`, which opens the mini app pre-filled with the current
